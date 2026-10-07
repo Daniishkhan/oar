@@ -125,7 +125,7 @@ export async function doctor(
       push(
         `${name}: claude login on VM`,
         ok,
-        ok ? 'claude.ai' : `oar vm ssh ${name} -- claude auth login`,
+        ok ? 'claude.ai' : `oar vm login ${name}`,
       )
       const codex = await runCommand(ctx.boat, vm.sandboxId, 'codex login status 2>&1 | head -1', {
         timeoutSeconds: 60,
@@ -136,7 +136,7 @@ export async function doctor(
         codexOk,
         codexOk
           ? codex!.stdout.trim()
-          : `scp ~/.codex/auth.json ${sshAlias(name)}:~/.codex/auth.json`,
+          : `oar vm login ${name} --codex` (or scp ~/.codex/auth.json ${sshAlias(name)}:~/.codex/auth.json && oar-creds save),
       )
       const repoDir = await runCommand(
         ctx.boat,

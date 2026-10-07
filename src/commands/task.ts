@@ -83,7 +83,7 @@ export async function taskDispatch(
 ): Promise<void> {
   const log = ctx.io.out
   const task = resolveTask(loadState(ctx.paths), ref)
-  if (!['draft', 'failed', 'closed'].includes(task.status)) {
+  if (['working', 'done', 'done-no-pr', 'suspended'].includes(task.status)) {
     throw new OarError(
       'usage',
       `task ${task.id} is ${task.status}`,

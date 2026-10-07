@@ -32,6 +32,7 @@ vm
   browser [repo]                boat's Chrome-only stream of the agent profile (needs the boat CLI)
   shot [repo] [--window name] [--out file] [--no-open]   screenshot of the VM desktop, saved locally
   setup [repo]                  re-copy setup/ and vm/ files and run the setup script
+  login [repo] [--codex]        claude auth login (or codex login) on the VM, saved so a resume keeps it
   snapshot [repo] <name>        named snapshot (boat new --from <name>)
   list
 
@@ -178,6 +179,13 @@ async function vmCmd(ctx: Ctx, args: string[]): Promise<number> {
         window: values.window,
         out: values.out,
         open: values['no-open'] ? false : undefined,
+      })
+      return 0
+    }
+    case 'login': {
+      const { values, positionals } = parse(rest, { ...repoOpt, codex: { type: 'boolean' } })
+      await vm.vmLogin(ctx, await repoArg(ctx, positionals[0], values.repo), {
+        codex: Boolean(values.codex),
       })
       return 0
     }
