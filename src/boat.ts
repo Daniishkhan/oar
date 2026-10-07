@@ -1,6 +1,7 @@
 import {
   BoatApi,
   Configuration,
+  FetchError,
   ResponseError,
   type CommandRequest,
   type CommandStatusResponse,
@@ -84,6 +85,12 @@ async function mapError(e: unknown): Promise<never> {
     throw new OarError('boat', `boat API ${e.response.status}${detail ? ` ${detail}` : ''}`)
   }
   if (e instanceof OarError) throw e
+  if (e instanceof FetchError)
+    throw new OarError(
+      'boat',
+      `boat API unreachable: ${e.cause instanceof Error ? e.cause.message : e.message}`,
+      'network hiccup; retry the command',
+    )
   throw new OarError('boat', `boat API: ${(e as Error).message}`)
 }
 
@@ -91,35 +98,48 @@ export function realBoat(apiKey: string): BoatClient {
   const api = new BoatApi(
     new Configuration({ basePath: 'https://boat.dev/api/v1', accessToken: apiKey }),
   )
-  const guard = <T>(p: Promise<T>): Promise<T> => p.catch(mapError)
+  /** Network-level failures (FetchError: DNS, TLS, reset) are retried; HTTP errors are not. */
+  const guard = async <T>(call: () => Promise<T>, attempts = 3): Promise<T> => {
+    for (let i = 1; ; i++) {
+      try {
+        return await call()
+      } catch (e) {
+        if (e instanceof FetchError && i < attempts) {
+          await sleep(1_000 * i)
+          continue
+        }
+        return mapError(e)
+      }
+    }
+  }
   return {
-    get: (id) => guard(api.get({ sandboxId: id })).then((r) => r.sandbox),
+    get: (id) => guard(() => api.get({ sandboxId: id })).then((r) => r.sandbox),
     create: (req, idempotencyKey) =>
-      guard(
+      guard(() =>
         api.create({ createSandboxRequest: req, ...(idempotencyKey ? { idempotencyKey } : {}) }),
       ).then((r) => r.sandbox),
     resume: (id, req) =>
-      guard(api.resume({ sandboxId: id, resumeRequest: req ?? {} })).then(() => undefined),
+      guard(() => api.resume({ sandboxId: id, resumeRequest: req ?? {} })).then(() => undefined),
     stop: (id, force) =>
-      guard(api.stop({ sandboxId: id, stopRequest: force ? { force: true } : {} })).then(
+      guard(() => api.stop({ sandboxId: id, stopRequest: force ? { force: true } : {} })).then(
         () => undefined,
       ),
     update: (id, req) =>
-      guard(api.update({ sandboxId: id, updateSandboxRequest: req })).then((r) => r.sandbox),
-    sshKey: (id, key) => guard(api.sshKey({ sandboxId: id, sshKeyRequest: { key } })),
+      guard(() => api.update({ sandboxId: id, updateSandboxRequest: req })).then((r) => r.sandbox),
+    sshKey: (id, key) => guard(() => api.sshKey({ sandboxId: id, sshKeyRequest: { key } })),
     hostPort: (id, port, opts = {}) =>
-      guard(
+      guard(() =>
         api.hostPort({
           sandboxId: id,
           hostPortRequest: { port, title: opts.title, _public: opts.isPublic ?? false },
         }),
       ),
     command: async (id, req) => {
-      const r = await guard(api.command({ sandboxId: id, commandRequest: req }))
+      const r = await guard(() => api.command({ sandboxId: id, commandRequest: req }))
       if ('processId' in r) return { processId: r.processId }
       return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: r.timedOut }
     },
-    commandStatus: (id, processId) => guard(api.commandStatus({ sandboxId: id, processId })),
+    commandStatus: (id, processId) => guard(() => api.commandStatus({ sandboxId: id, processId })),
     readFile: async (id, path) => {
       try {
         const r = await api.readFile({ sandboxId: id, path })
@@ -141,7 +161,7 @@ export function realBoat(apiKey: string): BoatClient {
       }
     },
     desktop: (id, opts = {}) =>
-      guard(
+      guard(() =>
         api.desktop({
           sandboxId: id,
           vnc: (opts.vnc ? '1' : undefined) as never,
@@ -155,16 +175,16 @@ export function realBoat(apiKey: string): BoatClient {
         message: r.message,
       })),
     writeFile: (id, path, content) =>
-      guard(
+      guard(() =>
         api.writeFile({ sandboxId: id, fileWriteRequest: { path, content, encoding: 'utf8' } }),
       ).then(() => undefined),
-    usage: (id, since, until) => guard(api.usage({ sandboxId: id, since, until })),
+    usage: (id, since, until) => guard(() => api.usage({ sandboxId: id, since, until })),
     saveNamedSnapshot: (id, name) =>
-      guard(api.saveNamedSnapshot({ namedSnapshotSaveRequest: { sandboxId: id, name } })).then(
-        () => undefined,
-      ),
+      guard(() =>
+        api.saveNamedSnapshot({ namedSnapshotSaveRequest: { sandboxId: id, name } }),
+      ).then(() => undefined),
     environments: () =>
-      guard(api.environments()).then((r) =>
+      guard(() => api.environments()).then((r) =>
         r.environments.map((e) => ({ id: e.id, name: e.name })),
       ),
   }
