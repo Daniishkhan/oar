@@ -28,6 +28,10 @@ describe('inferRepo', () => {
       stdout: 'git@github.com:Ai-Synapse1/Synapse-Django.git\n',
     })
     expect(await inferRepo(DEFAULT_CONFIG, exec, '/x')).toBe('cno')
+    const exec3 = new FakeExec().on('git remote get-url origin', {
+      stdout: 'git@github.com:Ai-Synapse1/nodes-cno.git\n',
+    })
+    expect(await inferRepo(DEFAULT_CONFIG, exec3, '/x')).toBe('cno')
     const exec2 = new FakeExec().on('git remote get-url origin', {
       stdout: 'https://github.com/Ai-Synapse1/nodes-engine\n',
     })

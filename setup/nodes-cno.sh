@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# oar VM setup for the `cno` repo (Ai-Synapse1/Synapse-Django at /home/user/Synapse-Django).
-# boat clones the repo and drops the secret file Synapse-Django/.env before this runs.
+# oar VM setup for the `cno` repo (Ai-Synapse1/nodes-cno at /home/user/nodes-cno).
+# boat clones the repo and drops the secret file nodes-cno/.env before this runs.
 set -euxo pipefail
 export HOME="${HOME:-/home/user}"; export PATH="$HOME/.local/bin:$PATH"
-REPO="$HOME/Synapse-Django"
+REPO="$HOME/nodes-cno"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "$HERE/common.sh"
 
@@ -27,4 +27,4 @@ docker compose -f deploy/local/compose.test.yml build django || true
 uvx --from pre-commit==3.7.1 pre-commit install || true
 
 graft build || echo "graft build failed; run it by hand once"
-echo "Synapse-Django (cno) ready"
+echo "nodes-cno ready"

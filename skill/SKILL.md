@@ -1,6 +1,6 @@
 ---
 name: oar
-description: Hand a task to Claude Code on this repo's boat.dev VM (engine = nodes-engine, cno = nodes-cno/Synapse-Django) with the `oar` CLI and track it to a draft PR. Use when the user says "hand off", "run on the VM", "overnight", "on boat", "dispatch", "/oar", or asks how a handed-off task is going.
+description: Hand a task to Claude Code on this repo's boat.dev VM (engine = nodes-engine, cno = nodes-cno) with the `oar` CLI and track it to a draft PR. Use when the user says "hand off", "run on the VM", "overnight", "on boat", "dispatch", "/oar", or asks how a handed-off task is going.
 ---
 
 # oar: hand a task to the VM

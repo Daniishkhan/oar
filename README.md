@@ -20,7 +20,7 @@ oar status               # every VM and task on one screen
 | ----------- | --------------------------------------------------------------------------------------------- |
 | Mac         | `oar` (this CLI), `herdr` client, `~/.claude/skills/oar` so Claude can hand work off          |
 | VM `engine` | `/home/user/nodes-engine`, Herdr server (systemd), Claude Code logged in with the Max plan    |
-| VM `cno`    | `/home/user/Synapse-Django`, same                                                             |
+| VM `cno`    | `/home/user/nodes-cno`, same                                                                  |
 | Phone       | Claude app → Code tab: every dispatched task is a Remote Control session named after the task |
 
 A task = a brief (`~/.local/state/oar/tasks/<id>/brief.md`) + a branch `codex/<slug>` + a git

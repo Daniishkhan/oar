@@ -7,7 +7,7 @@ This is a disposable Linux VM. Nothing here is the developer's laptop.
   (push, draft PR, `touch .../done`). Follow it exactly; it is how progress gets noticed.
 - Work on a branch, never on `main`. Commit as you go. Never force-push.
 - Before you declare a task finished run the repo's own gate:
-  nodes-engine: `pnpm verify`. Synapse-Django: `make lint` and `make test`.
+  nodes-engine: `pnpm verify`. nodes-cno: `make lint` and `make test`.
 - Long jobs (test suites, builds) go through the Bash tool with a timeout; the VM never
   sleeps, so you may wait for them.
 - Services you start (`pnpm db:up`, `docker compose up`) do not survive a VM stop. If

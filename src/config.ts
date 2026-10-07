@@ -45,7 +45,7 @@ export function paths(home: string = homedir()): Paths {
 }
 
 export const RepoSchema = z.object({
-  /** Substring of `git remote get-url origin` that identifies this repo on the Mac. */
+  /** Regex tested against `git remote get-url origin` to identify this repo on the Mac. */
   remoteMatch: z.string().min(1),
   github: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
   envName: z.string().min(1),
@@ -109,14 +109,14 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       herdrLabel: 'engine',
     },
     cno: {
-      remoteMatch: 'Synapse-Django',
-      github: 'Ai-Synapse1/Synapse-Django',
+      remoteMatch: 'nodes-cno|Synapse-Django',
+      github: 'Ai-Synapse1/nodes-cno',
       envName: 'cno',
-      vmPath: '/home/user/Synapse-Django',
+      vmPath: '/home/user/nodes-cno',
       setupScript: 'nodes-cno.sh',
       gate: 'make lint && make test',
       worktreeRoot: '/home/user/worktrees/cno',
-      worktreeInit: ['cp /home/user/Synapse-Django/.env .env'],
+      worktreeInit: ['cp /home/user/nodes-cno/.env .env'],
       ports: [8000],
       herdrLabel: 'cno',
     },
@@ -199,7 +199,7 @@ export async function inferRepo(config: Config, exec: Exec, cwd: string): Promis
     )
   }
   for (const [name, repo] of Object.entries(config.repos)) {
-    if (url.includes(repo.remoteMatch)) return name
+    if (new RegExp(repo.remoteMatch).test(url)) return name
   }
   throw new OarError(
     'usage',
