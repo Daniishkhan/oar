@@ -9,8 +9,7 @@ bash "$HERE/common.sh"
 
 cd "$REPO"
 node --version                                   # needs 24.x (preinstalled on boat machines)
-# pnpm 12.3.4 pinned by packageManager: corepack first, plain npm as fallback.
-( corepack enable && corepack prepare pnpm@12.3.4 --activate ) || npm install -g pnpm@12.3.4
+pnpm --version                                   # 12.3.4, installed and linked by common.sh
 pnpm install --frozen-lockfile
 
 # Postgres image for `pnpm db:up` (compose.yaml). Containers do not survive stop/resume; images do.

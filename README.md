@@ -78,8 +78,9 @@ and a recording fake exec; nothing touches the network. `pnpm dev -- <args>` run
 
 Update this list as the end-to-end checks from the plan are run against the real account.
 
-- [ ] `sshKey` returns `sshEndpoint` or `machineIp`, and a single-line `hostKey`
+- [x] `sshKey` returns `sshEndpoint` (`host:port`, NATed) and a single-line `ssh-ed25519` `hostKey` (2026-10-07, engine)
 - [ ] PATCH `ttlSeconds` anchor (now vs last resume) — `oar vm keep` logs the correction when it happens
+- [x] `herdr-server.service` is enabled and active after setup with the socket at `~/.config/herdr/herdr.sock` (2026-10-07)
 - [ ] `herdr-server.service` restores the session after a resume and `herdr --remote` attaches to it
 - [ ] `herdr --machine` works again after the endpoint changes, without `machine reconnect`
 - [ ] `worktree create` result fields mirror `workspace create`

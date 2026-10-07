@@ -19,8 +19,16 @@ if command -v systemctl >/dev/null 2>&1 && [ -f "$HERE/herdr-server.service" ]; 
   sudo systemctl enable --now herdr-server || true
 fi
 
-# graft code graph (the sandbox CLAUDE.md tells Claude to use it).
-command -v graft >/dev/null 2>&1 || npm install -g @nanonets/graft@latest
+# npm's global prefix on the boat image is nvm's, which login shells see but `ssh host cmd`,
+# boat's command API and systemd do not. Install globals there, then expose them in ~/.local/bin.
+# pnpm 12.3.4 is what nodes-engine pins (corepack cannot write /usr/bin here).
+npm install -g pnpm@12.3.4 @nanonets/graft@latest
+# npm 11 refuses graft's native-build install scripts; the grammars ship prebuilds, so a rebuild is enough.
+npm rebuild -g @nanonets/graft >/dev/null 2>&1 || true
+GBIN="$(npm prefix -g)/bin"
+for b in pnpm pnpx graft; do [ -x "$GBIN/$b" ] && ln -sf "$GBIN/$b" "$HOME/.local/bin/$b"; done
+hash -r
+pnpm --version; graft --version
 
 # uv: Python toolchain manager (Synapse-Django) and `uvx` for pre-commit.
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
