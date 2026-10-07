@@ -157,11 +157,11 @@ export async function checkRuns(gh: GhFeed, sha: string): Promise<CheckSummary |
   const p = CheckRuns.safeParse(json)
   if (!p.success) return null
   const runs = p.data.check_runs
+  // A cancelled run (a job timeout, a superseded push) says nothing about the change itself and
+  // is a human's rerun to make, not a round for the agent.
   const failed = runs
     .filter(
-      (c) =>
-        c.status === 'completed' &&
-        ['failure', 'timed_out', 'cancelled'].includes(c.conclusion ?? ''),
+      (c) => c.status === 'completed' && ['failure', 'timed_out'].includes(c.conclusion ?? ''),
     )
     .map((c) => c.name)
   const pending = runs.some((c) => c.status !== 'completed')

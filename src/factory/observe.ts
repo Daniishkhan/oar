@@ -17,7 +17,7 @@ export interface ObserveDeps {
   stateKeyOf(name: string, type: string): StateKey | 'other'
   concurrency(repo: string): number
   /** Sandbox state per repo, fetched once per tick; `null` = no VM recorded. */
-  vmUp(repo: string): boolean | null
+  vmState(repo: string): 'up' | 'changing' | 'down' | null
   sandboxId(repo: string): string | null
   /** The expensive GitHub reads (reviews, checks, deploy runs) happen only on these ticks. */
   githubDue: boolean
@@ -28,8 +28,9 @@ const DONE_TYPES = new Set(['completed', 'canceled'])
 /** Everything `decide` needs about one issue, read without side effects. */
 export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): Promise<Facts> {
   const nowIso = new Date(ctx.now()).toISOString()
+  const vmState = deps.vmState(row.repo)
   const facts: Facts = {
-    vmUp: deps.vmUp(row.repo),
+    vmUp: vmState === null ? null : vmState !== 'down',
     agent: null,
     pr: null,
     marker: false,
@@ -61,8 +62,11 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
   if (row.phase !== 'merged')
     facts.pr = await prSnapshot(ctx.exec, ctx.boat, sandboxId, cfg, task.branch).catch(() => null)
 
-  if (facts.vmUp === false || !sandboxId) {
+  if (vmState === 'down' || !sandboxId) {
     facts.agent = 'vm-down'
+  } else if (vmState === 'changing') {
+    // boat is resuming, updating or snapshotting the VM: nothing can be read; wait a tick.
+    facts.agent = 'unknown'
   } else if (task.handle?.runner === 'herdr') {
     const handle = task.handle
     const { status } = await agentState(ctx, cfg, handle).catch(() => ({

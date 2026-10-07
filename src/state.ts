@@ -21,6 +21,7 @@ export const SandboxStates = [
   'ready',
   'idle',
   'running',
+  'updating',
   'archiving',
   'archived',
   'error',
@@ -34,6 +35,7 @@ export const CHANGING_STATES: ReadonlySet<SandboxState> = new Set([
   'provisioning',
   'provisioned',
   'cloning',
+  'updating',
   'archiving',
 ])
 

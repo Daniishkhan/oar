@@ -4,7 +4,7 @@ import { sandboxState } from '../boat.js'
 import { loadSecrets } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
-import { loadState, UP_STATES } from '../state.js'
+import { CHANGING_STATES, loadState, UP_STATES } from '../state.js'
 import { sleep } from '../time.js'
 import { Applier } from './apply.js'
 import { FactoryDb } from './db.js'
@@ -74,7 +74,7 @@ export class Factory {
   private readonly teamIds = new Map<string, string>()
   private readonly stateIds = new Map<string, Map<string, string>>()
   private readonly idleSince = new Map<string, number>()
-  private vmStates = new Map<string, boolean | null>()
+  private vmStates = new Map<string, 'up' | 'changing' | 'down' | null>()
   tick = 0
 
   constructor(
@@ -251,7 +251,7 @@ export class Factory {
 
   private async refreshVms(): Promise<void> {
     const state = loadState(this.ctx.paths)
-    const next = new Map<string, boolean | null>()
+    const next = new Map<string, 'up' | 'changing' | 'down' | null>()
     for (const repo of Object.keys(this.ctx.config.repos)) {
       const vm = state.vms[repo]
       if (!vm) {
@@ -259,7 +259,17 @@ export class Factory {
         continue
       }
       const sb = await this.ctx.boat.get(vm.sandboxId).catch(() => null)
-      next.set(repo, sb ? UP_STATES.has(sandboxState(sb)) : false)
+      const st = sb ? sandboxState(sb) : null
+      next.set(
+        repo,
+        st === null
+          ? 'changing'
+          : UP_STATES.has(st)
+            ? 'up'
+            : CHANGING_STATES.has(st)
+              ? 'changing'
+              : 'down',
+      )
     }
     this.vmStates = next
   }
@@ -291,7 +301,7 @@ export class Factory {
           jobs: this.jobs,
           stateKeyOf: (n, t) => this.stateKeyOf(n, t),
           concurrency: (repo) => this.ctx.config.factory.concurrency[repo] ?? 1,
-          vmUp: (repo) => this.vmStates.get(repo) ?? null,
+          vmState: (repo) => this.vmStates.get(repo) ?? null,
           sandboxId: (repo) => state.vms[repo]?.sandboxId ?? null,
           githubDue,
         })

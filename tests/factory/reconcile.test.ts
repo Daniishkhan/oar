@@ -175,6 +175,22 @@ describe('decide: building', () => {
     expect(kinds(a)).not.toContain('link_pr')
     expect(find(a, 'comment')?.body).toContain('Round 2 pushed')
   })
+  it('returns a later round with no commits to review instead of asking', () => {
+    const a = decide(
+      b({ round: 2, prNumber: 7, roundStartSha: 'abc123' }),
+      facts({
+        agent: 'idle',
+        linearKey: 'inProgress',
+        marker: true,
+        pr: pr(),
+        paneTail: 'nothing to change',
+      }),
+      ctx,
+    )
+    expect(kinds(a)).toEqual(['comment', 'set_state', 'set_phase', 'event'])
+    expect(find(a, 'comment')?.key).toBe('noop-2')
+    expect(find(a, 'set_phase')?.phase).toBe('review')
+  })
   it('asks for input when done was touched but nothing was pushed', () => {
     const a = decide(
       b({ roundStartSha: 'abc123' }),

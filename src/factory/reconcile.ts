@@ -176,6 +176,19 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           )
           return actions
         }
+        if (row.round > 1 && f.pr && f.pr.state === 'OPEN')
+          // A review or CI round can legitimately end with nothing to change; the agent's reply
+          // goes back on the issue and the PR waits for the next review.
+          return [
+            {
+              kind: 'comment',
+              key: `noop-${row.round}`,
+              body: `Round ${row.round} ended without new commits; the agent's reply:${fence(f.paneTail, 1200)}`,
+            },
+            { kind: 'set_state', state: 'inReview' },
+            { kind: 'set_phase', phase: 'review', reviewCursor: f.nowIso },
+            { kind: 'event', name: 'review', detail: `round ${row.round} (no changes)` },
+          ]
         return needsInput(
           `nopush-${row.round}`,
           withMention(

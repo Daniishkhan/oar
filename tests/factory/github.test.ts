@@ -216,7 +216,7 @@ describe('checkRuns', () => {
     )
     expect(r).toEqual({
       headSha: 'abc',
-      failed: ['lint', 'slow', 'stop'],
+      failed: ['lint', 'slow'],
       pending: false,
       passed: false,
     })
