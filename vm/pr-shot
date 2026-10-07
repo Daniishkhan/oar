@@ -8,7 +8,7 @@ png="${1:?png path}"; label="${2:-screenshot}"
 [ -f "$png" ] || { echo "pr-shot: $png not found" >&2; exit 2; }
 root="$(git rev-parse --show-toplevel)"
 remote="$(git -C "$root" remote get-url origin)"
-slug="$(echo "$remote" | sed -E 's#.*[:/]([^/]+)/([^/]+?)(\.git)?$#\1/\2#')"
+slug="$(echo "$remote" | sed -E 's#.*[:/]([^/]+)/([^/]+)$#\1/\2#; s#\.git$##')"
 branch="$(git -C "$root" rev-parse --abbrev-ref HEAD | tr '/' '-')"
 name="$(basename "$png")"
 dest="$branch/$(date -u +%Y%m%dT%H%M%SZ)-$name"
