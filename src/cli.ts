@@ -2,6 +2,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, type ParseArgsConfig } from 'node:util'
 import { doctor } from './commands/doctor.js'
+import { factoryCmd } from './commands/factory.js'
 import { status } from './commands/status.js'
 import * as task from './commands/task.js'
 import * as vm from './commands/vm.js'
@@ -18,6 +19,7 @@ const HELP = `oar — remote coding on boat.dev (one VM per repo, Herdr on the V
   oar status [--all]            every VM and task on one screen
   oar watch [--until-idle]      poll live tasks, notify on blocked/done, keep the VM alive
   oar doctor [--repo r] [--quiet]
+  oar factory setup|deploy|status|log|pause|resume|attach|up|stop|doctor|states
 
 vm
   new <repo> [--no-login] [--type small|default|large]   create from the boat environment, run setup, log Claude in, register in Herdr
@@ -48,6 +50,15 @@ task
   resume <id|slug>              re-attach after the VM was stopped and resumed
   close <id|slug>               hide it from lists
   list [--all]
+
+factory (an always-on controller VM turns Linear issues into tasks on the repo VMs)
+  setup                         create/resume the controller, copy oar there, join the tailnet, register workers, start the service
+  deploy                        rebuild oar, copy it to the controller, restart the service
+  status | log [ISSUE] [-f]     what the controller is doing (forwarded over ssh)
+  pause | resume                stop/allow new dispatches
+  attach <ENG-12>               focus the issue's agent on its worker and attach Herdr
+  up | stop                     the controller sandbox itself
+  doctor | states               controller health; create missing Linear workflow states
 
 Repo is inferred from the current git checkout's origin when omitted. Exit codes: 1 error, 2 usage, 3 agent blocked.`
 
@@ -311,6 +322,8 @@ export async function main(argv: string[], ctx: Ctx = buildCtx()): Promise<numbe
       return vmCmd(ctx, rest)
     case 'task':
       return taskCmd(ctx, rest)
+    case 'factory':
+      return factoryCmd(ctx, rest)
     case 'status': {
       const { values } = parse(rest, { all: { type: 'boolean' } })
       await status(ctx, { all: Boolean(values.all) })

@@ -11,7 +11,7 @@ import {
   waitForState,
   waitUp,
 } from '../boat.js'
-import { loadSecrets, repoConfig, sshAlias, tailnetHost, type RepoConfig } from '../config.js'
+import { loadSecrets, repoConfig, sshAlias, tailnetHost } from '../config.js'
 import type { Ctx } from '../context.js'
 import { shq } from '../exec.js'
 import { OarError } from '../errors.js'
@@ -42,6 +42,14 @@ async function refreshSsh(ctx: Ctx, repo: string, vm: VmRecord, log: Log): Promi
   const res = await ctx.boat.sshKey(vm.sandboxId, pub)
   const endpoint = ssh.endpointFrom(res)
   if (!res.hostKey) throw new OarError('ssh', 'boat returned no host key to pin')
+  // Two hosts (the Mac and the factory controller) share each worker. boat's sshKey "adds" a key;
+  // in case it ever replaces the file, every host re-appends its own key, idempotently.
+  await runCommand(
+    ctx.boat,
+    vm.sandboxId,
+    `mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF ${shq(pub)} ~/.ssh/authorized_keys || echo ${shq(pub)} >> ~/.ssh/authorized_keys)`,
+    { timeoutSeconds: 30 },
+  ).catch(() => undefined)
   const tsHost = tailnetHost(ctx.config, repo)
   const alias = sshAlias(repo)
   ssh.pin(ctx.paths, {
@@ -80,46 +88,59 @@ export function reachableAlias(vm: VmRecord, repo: string): string {
 async function ensureHerdrServer(
   ctx: Ctx,
   repo: string,
-  cfg: RepoConfig,
+  label: string,
+  via: string,
   log: Log,
   interactiveFallback: boolean,
 ): Promise<boolean> {
-  const machine = new HerdrMachine(ctx.exec, cfg.herdrLabel)
+  const machine = new HerdrMachine(ctx.exec, label)
   if (await machine.reachable()) return true
-  log('herdr server on the VM not reachable; restarting it')
-  await ssh.remote(
-    ctx.exec,
-    sshAlias(repo),
-    'sudo systemctl restart herdr-server 2>/dev/null || (nohup ~/.local/bin/herdr server >/dev/null 2>&1 &)',
-  )
-  for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 3_000))
-    if (await machine.reachable()) return true
+  // Another host (the Mac or the controller) may be driving agents on this VM right now: only
+  // restart the server when systemd says it is down, never just because this client cannot reach it.
+  const active = await ssh
+    .remote(ctx.exec, via, 'systemctl is-active herdr-server 2>/dev/null', 30_000)
+    .catch(() => null)
+  if (active?.stdout.trim() === 'active') {
+    log('herdr-server is active on the VM but this client cannot reach it (stale machine profile?)')
+  } else {
+    log('herdr server on the VM not running; starting it')
+    await ssh.remote(
+      ctx.exec,
+      via,
+      'sudo systemctl restart herdr-server 2>/dev/null || (nohup ~/.local/bin/herdr server >/dev/null 2>&1 &)',
+    )
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 3_000))
+      if (await machine.reachable()) return true
+    }
   }
   const known = await localHerdr.machines(ctx.exec)
-  if (!known.some((m) => m.label === cfg.herdrLabel)) {
+  if (!known.some((m) => m.label === label)) {
     log(
-      `no Herdr machine profile '${cfg.herdrLabel}'; run: herdr machine add ${sshAlias(repo)} --label ${cfg.herdrLabel}`,
+      `no Herdr machine profile '${label}'; run: herdr machine add ${sshAlias(repo)} --label ${label} --remote-session default`,
     )
     return false
   }
   if (interactiveFallback && ctx.io.isTTY) {
-    log(`running: herdr machine reconnect ${cfg.herdrLabel}`)
-    await localHerdr.machineReconnect(ctx.exec, cfg.herdrLabel)
+    log(`running: herdr machine reconnect ${label}`)
+    await localHerdr.machineReconnect(ctx.exec, label)
     return machine.reachable()
   }
   return false
 }
 
-/** Resume if needed, refresh SSH, make sure Herdr answers. Used by `vm up` and by every task command. */
+/**
+ * Resume if needed, refresh SSH, make sure Herdr answers. Used by `vm up` and by every task command.
+ * `repo` is any key in state.vms (a repo, or `factory` for the controller, which has no Herdr label to check).
+ */
 export async function ensureUp(
   ctx: Ctx,
   repo: string,
   log: Log,
-  opts: { interactive?: boolean } = {},
+  opts: { interactive?: boolean; herdr?: boolean } = {},
 ): Promise<UpResult> {
-  const cfg = repoConfig(ctx.config, repo)
   let vm = requireVm(loadState(ctx.paths), repo)
+  const label = vm.label
   let sb = await ctx.boat.get(vm.sandboxId)
   let st = sandboxState(sb)
   if (CHANGING_STATES.has(st)) {
@@ -152,7 +173,17 @@ export async function ensureUp(
     )
     .catch(() => null)
   if (creds?.stdout.trim()) log(`logins: ${creds.stdout.trim().split('\n').join(', ')}`)
-  const herdrReachable = await ensureHerdrServer(ctx, repo, cfg, log, opts.interactive ?? false)
+  const herdrReachable =
+    opts.herdr === false
+      ? false
+      : await ensureHerdrServer(
+          ctx,
+          repo,
+          label,
+          reachableAlias(vm, repo),
+          log,
+          opts.interactive ?? false,
+        )
   await mutateState(ctx.paths, (s) => {
     const rec = requireVm(s, repo)
     rec.lastSeenState = st
@@ -254,7 +285,7 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
 }
 
 /** Joins the VM to the tailnet (first time needs TS_AUTHKEY), then re-pins so `oar-<repo>` uses the tailnet name. */
-async function setupTailscale(
+export async function setupTailscale(
   ctx: Ctx,
   repo: string,
   id: string,
@@ -493,6 +524,23 @@ export async function vmStop(
       `${working.length} live task(s) on ${repo}: ${working.map((t) => t.id).join(', ')}`,
       'pass --force-tasks to stop anyway (they become suspended)',
     )
+  }
+  // Agents started by another host (the factory controller, or the Mac) are invisible in this
+  // state file; ask the VM's Herdr before pulling the plug.
+  if (!opts.forceTasks && vm.label) {
+    const sb = await ctx.boat.get(vm.sandboxId).catch(() => null)
+    if (sb && UP_STATES.has(sandboxState(sb))) {
+      const agents = await new HerdrMachine(ctx.exec, vm.label).agents().catch(() => [])
+      const busy = agents.filter(
+        (a) => a.agent_status === 'working' || a.agent_status === 'blocked',
+      )
+      if (busy.length)
+        throw new OarError(
+          'usage',
+          `${busy.length} agent(s) still ${busy.map((a) => `${a.name ?? a.pane_id}:${a.agent_status}`).join(', ')} on ${repo}`,
+          'they may belong to the factory controller; pass --force-tasks to stop anyway',
+        )
+    }
   }
   await ctx.boat.stop(vm.sandboxId)
   await mutateState(ctx.paths, (s) => {

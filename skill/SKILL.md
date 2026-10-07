@@ -35,6 +35,14 @@ from AGENTS.md "Where to work"). For research tasks say where to write the repor
 list the questions it must answer. Do **not** write finish steps (push, PR, done marker): oar
 appends them. Use the template sections Goal / Scope / Plan / Gate / When blocked.
 
+## The factory (Linear)
+
+When the user wants work queued rather than dispatched by hand, put it in Linear: an issue in
+the repo's team (ENG = engine, CNO = cno) moved to **Ready** is picked up by the always-on
+controller (`oar factory status` shows it). Questions from the agent arrive as comments on the
+issue; replies there go back to the agent. `oar factory attach ENG-12` opens the agent's pane.
+Do not also `oar task dispatch` the same work: the two would share one VM screen.
+
 ## Commands
 
 ```bash

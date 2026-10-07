@@ -42,7 +42,7 @@ describe('footer', () => {
     expect(f).toContain('/home/user/worktrees/cno/fix')
     expect(f).toContain('make lint && make test')
     const push = f.indexOf('git push -u origin codex/fix')
-    const pr = f.indexOf('gh pr create --draft --base main --head codex/fix')
+    const pr = f.indexOf('gh pr create --draft --base dev --head codex/fix')
     const done = f.indexOf('touch /home/user/oar/tasks/fix-1234/done')
     expect(push).toBeGreaterThan(0)
     expect(pr).toBeGreaterThan(push)

@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { ensureDeadline, runCommand, sandboxState } from '../boat.js'
-import { createBrief, newTaskId, validateSlug, vmDoneMarker } from '../brief.js'
+import { createBrief, newTaskId, validateSlug, vmDoneMarker, type FooterOptions } from '../brief.js'
 import { repoConfig, sshAlias } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
@@ -76,6 +76,64 @@ export async function taskNew(ctx: Ctx, o: NewTaskOptions): Promise<Task> {
   return task
 }
 
+export interface DispatchTaskOptions {
+  reuseBranch?: boolean
+  log: (line: string) => void
+  /** Keep the VM alive this long from now (default: the task's hours). */
+  hours?: number
+  /** Extra footer rules for the brief (the factory's PR naming and question convention). */
+  footer?: FooterOptions
+}
+
+/** Bring the VM up, run the agent, record the handle; the state file reflects failure too. */
+export async function dispatchTask(
+  ctx: Ctx,
+  task: Task,
+  opts: DispatchTaskOptions,
+): Promise<{ handle: HerdrHandle; note?: string }> {
+  const { log } = opts
+  const cfg = repoConfig(ctx.config, task.repo)
+  const up = await ensureUp(ctx, task.repo, log)
+  if (!up.herdrReachable)
+    throw new OarError(
+      'herdr',
+      `Herdr on ${task.repo} is not reachable`,
+      `oar vm up ${task.repo} first (it repairs the server), then dispatch again`,
+    )
+  let result
+  try {
+    result = await dispatchHerdr(ctx, task, cfg, up.vm, {
+      reuseBranch: opts.reuseBranch,
+      log,
+      footer: opts.footer,
+    })
+  } catch (e) {
+    await mutateState(ctx.paths, (s) => {
+      const t = s.tasks[task.id]
+      if (t) {
+        t.status = e instanceof OarError && e.code === 'blocked' ? 'blocked' : 'failed'
+        t.note = (e as Error).message.split('\n')[0]
+      }
+    })
+    throw e
+  }
+  const deadline = hoursFromNow(opts.hours ?? task.hours, ctx.now())
+  const after = await ensureDeadline(ctx.boat, up.vm.sandboxId, deadline, {
+    log,
+    now: ctx.now,
+  }).catch(() => null)
+  await mutateState(ctx.paths, (s) => {
+    const t = s.tasks[task.id]!
+    t.status = result.note ? 'dispatched' : 'working'
+    t.dispatchedAt = nowIso()
+    t.handle = result.handle
+    t.note = result.note
+    t.lastAgentStatus = result.note ? undefined : 'working'
+    requireVm(s, task.repo).archiveAfter = after?.toISOString() ?? null
+  })
+  return result
+}
+
 export async function taskDispatch(
   ctx: Ctx,
   ref: string,
@@ -90,41 +148,11 @@ export async function taskDispatch(
       task.status === 'suspended' ? `oar task resume ${task.id}` : `oar task status ${task.id}`,
     )
   }
-  const cfg = repoConfig(ctx.config, task.repo)
-  const up = await ensureUp(ctx, task.repo, log)
-  if (!up.herdrReachable)
-    throw new OarError(
-      'herdr',
-      `Herdr on ${task.repo} is not reachable`,
-      `oar vm up ${task.repo} first (it repairs the server), then dispatch again`,
+  if (ctx.config.factory.role === 'client' && loadState(ctx.paths).vms.factory)
+    log(
+      `note: a factory controller is configured; it dispatches Linear issues to ${task.repo} on its own. Both will share the VM's one screen.`,
     )
-  let result
-  try {
-    result = await dispatchHerdr(ctx, task, cfg, up.vm, { reuseBranch: opts.reuseBranch, log })
-  } catch (e) {
-    await mutateState(ctx.paths, (s) => {
-      const t = s.tasks[task.id]
-      if (t) {
-        t.status = e instanceof OarError && e.code === 'blocked' ? 'blocked' : 'failed'
-        t.note = (e as Error).message.split('\n')[0]
-      }
-    })
-    throw e
-  }
-  const deadline = hoursFromNow(task.hours, ctx.now())
-  const after = await ensureDeadline(ctx.boat, up.vm.sandboxId, deadline, {
-    log,
-    now: ctx.now,
-  }).catch(() => null)
-  await mutateState(ctx.paths, (s) => {
-    const t = s.tasks[task.id]!
-    t.status = result.note ? 'dispatched' : 'working'
-    t.dispatchedAt = nowIso()
-    t.handle = result.handle
-    t.note = result.note
-    t.lastAgentStatus = result.note ? undefined : 'working'
-    requireVm(s, task.repo).archiveAfter = after?.toISOString() ?? null
-  })
+  const result = await dispatchTask(ctx, task, { reuseBranch: opts.reuseBranch, log })
   log('')
   log(`${task.id} dispatched on ${task.repo}: branch ${task.branch}, worktree ${task.worktreePath}`)
   if (result.note) log(`note: ${result.note}`)

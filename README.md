@@ -74,6 +74,42 @@ screenshot to the Mac. Agents get `browser`, `browser-headless`, `chrome-devtool
 `oar vm keep <repo> 10` pushes it; `oar watch` extends it while a task is working, within the
 task's `--hours` budget. `oar status` shows "$ today" per VM.
 
+## Factory (Linear → agents, no Mac in the loop)
+
+An always-on `small` boat VM, `oar-factory`, runs `oar factory serve` as a systemd unit. It polls
+Linear and GitHub and drives the worker VMs with the same code the CLI uses:
+
+- A Linear issue moved to **Ready** (team `ENG` → engine, `CNO` → cno; `factory.linear.teams`)
+  becomes an oar task: brief from the issue and its comments, branch `codex/<team>-<n>-<slug>`,
+  a Claude pane on the repo VM. The controller comments "Started…" and moves the card to
+  **In Progress**.
+- The agent asks by writing `question.md` next to its brief and stopping: the question lands on
+  the issue (**Needs Input**), your reply is sent back as the next prompt. Any comment on an
+  active issue reaches the agent (steered while it works, prompted when it waits).
+- A draft PR with new commits moves the card to **In Review**; review comments, a
+  changes-requested review and red CI come back as numbered rounds; a merge moves it to **Done**
+  (nodes-cno: the staging workflow result is posted first). Canceling stops the agent.
+- The keeper extends worker TTLs while they hold work and stops a worker idle for
+  `factory.idleStopMinutes` (no busy Herdr agent, no terminal session). The controller itself
+  never auto-stops.
+
+Identity: an OAuth application in Linear ("oar", client credentials enabled) so its comments are
+its own and notify you; `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` in `~/.config/oar/env`
+(`LINEAR_API_KEY` works as a fallback, without notifications). Per Linear team, set the GitHub
+PR automation to _merged → Done_ only.
+
+```bash
+oar factory setup            # controller VM, bundle, tailnet, worker keys + Herdr profiles, states, service
+oar factory status           # phases per issue, VMs, last tick (forwarded over ssh)
+oar factory log ENG-12 -f    # the controller's event log
+oar factory attach ENG-12    # Herdr on the issue's agent
+oar factory pause|resume     # hold new dispatches (running issues continue)
+oar factory deploy           # after changing oar: rebuild, copy, restart
+```
+
+State on the controller: `~/.local/state/oar/state.json` (tasks, VMs) and `factory.sqlite`
+(issues, rounds, comment delivery, idempotency keys, events).
+
 ## Development
 
 `pnpm verify` = typecheck, format check, lint, tests. Unit tests use a scripted fake boat client
@@ -99,3 +135,8 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] `gh pr create` on the VM works with the injected token: nodes-engine draft PR #149 from the smoke task (2026-10-07)
 - [x] `herdr machine add <alias> --label <l> --remote-session default` works non-interactively once the server runs on the VM (2026-10-07)
 - [ ] Codex is not logged in on the VMs, so nodes-engine's pre-PR Codex review reports "did not run"; `codex login` over `oar vm ssh` if wanted
+- [ ] boat `sshKey` appends (not replaces) authorized keys; every host re-appends its own key on `vm up` anyway
+- [ ] `ttlSeconds: null` accepted for the controller sandbox (else the keeper pushes its deadline 24 h at a time)
+- [ ] Linux Herdr client forwards `--machine` to another VM (controller → workers)
+- [ ] Linear client-credentials token works for `viewer`, `issueUpdate`, `commentCreate` with a client id, `workflowStateCreate`
+- [ ] A comment from the "oar" app user pushes to the phone

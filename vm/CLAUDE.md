@@ -14,6 +14,13 @@ This is a disposable Linux VM. Nothing here is the developer's laptop.
   Postgres is missing, start it again instead of debugging.
 - If the user is away (Remote Control), prefer finishing with a push and a short summary
   over asking questions. Ask only when a wrong guess would waste the night.
+- Factory tasks (the brief names a Linear issue such as ENG-12) are watched by a controller, not
+  a person. To ask something: write the question with its options and your recommendation to
+  `/home/user/oar/tasks/<id>/question.md`, say it in the terminal, and stop. Never open the
+  AskUserQuestion dialog; nobody can click it. The answer arrives as your next prompt.
+- A review round arrives as `/home/user/oar/tasks/<id>/review-<n>.md`: address every item, push
+  to the same branch, run the gate, `touch .../done` again, and reply with a summary. Never
+  comment on the PR yourself and never open a second PR for the same issue.
 
 # Seeing things
 

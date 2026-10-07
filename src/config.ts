@@ -63,8 +63,66 @@ export const RepoSchema = z.object({
   herdrLabel: z.string().min(1),
   /** The repo's suites need Playwright's own browsers (doctor checks they survive resumes). */
   playwright: z.boolean().default(false),
+  /** GitHub Actions workflow file that deploys `baseBranch` after a merge (its result is posted on the issue). */
+  deployWorkflow: z.string().optional(),
 })
 export type RepoConfig = z.infer<typeof RepoSchema>
+
+const DEFAULT_STATES = {
+  ready: 'Ready',
+  inProgress: 'In Progress',
+  needsInput: 'Needs Input',
+  inReview: 'In Review',
+  done: 'Done',
+  canceled: 'Canceled',
+}
+
+/** The always-on controller that turns Linear issues into tasks (see README "Factory"). */
+export const FactorySchema = z.object({
+  /** `controller` on the oar-factory VM itself; a `client` forwards `oar factory …` to it over ssh. */
+  role: z.enum(['client', 'controller']).default('client'),
+  controller: z
+    .object({
+      name: z.string().default('oar-factory'),
+      type: z.enum(['small', 'default', 'large']).default('small'),
+      /** The controller's own sandbox id; written into the controller's config by `oar factory setup`. */
+      sandboxId: z.string().optional(),
+    })
+    .default({ name: 'oar-factory', type: 'small' }),
+  linear: z
+    .object({
+      /** Linear team key → repo key. */
+      teams: z.record(z.string(), z.string()).default({ ENG: 'engine', CNO: 'cno' }),
+      /** Workflow state names per logical state; created by `oar factory setup` when missing. */
+      states: z
+        .object({
+          ready: z.string().default('Ready'),
+          inProgress: z.string().default('In Progress'),
+          needsInput: z.string().default('Needs Input'),
+          inReview: z.string().default('In Review'),
+          done: z.string().default('Done'),
+          canceled: z.string().default('Canceled'),
+        })
+        .default(DEFAULT_STATES),
+      /** Pasted into question comments so Linear notifies you (a profile URL becomes a mention). */
+      mention: z.string().optional(),
+    })
+    .default({ teams: { ENG: 'engine', CNO: 'cno' }, states: DEFAULT_STATES }),
+  /** Agents building at once per repo (one until forks exist). */
+  concurrency: z.record(z.string(), z.number().int().positive()).default({}),
+  idleStopMinutes: z.number().positive().default(45),
+  githubPollSeconds: z.number().int().min(15).default(60),
+  maxCiRounds: z.number().int().min(0).default(3),
+  jobTimeoutMinutes: z.number().positive().default(30),
+})
+export type FactoryConfig = z.infer<typeof FactorySchema>
+
+export const DEFAULT_FACTORY: FactoryConfig = FactorySchema.parse({})
+
+const TAILSCALE_CLI =
+  process.platform === 'darwin'
+    ? '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+    : 'tailscale'
 
 export const ConfigSchema = z.object({
   version: z.literal(1),
@@ -98,15 +156,16 @@ export const ConfigSchema = z.object({
     .object({
       enabled: z.boolean().default(false),
       suffix: z.string().optional(),
-      cli: z.string().default('/Applications/Tailscale.app/Contents/MacOS/Tailscale'),
+      cli: z.string().default(TAILSCALE_CLI),
       tag: z.string().default('tag:oar'),
     })
     .default({
       enabled: false,
-      cli: '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+      cli: TAILSCALE_CLI,
       tag: 'tag:oar',
     }),
   repos: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,15}$/), RepoSchema),
+  factory: FactorySchema.default(DEFAULT_FACTORY),
 })
 export type Config = z.infer<typeof ConfigSchema>
 
@@ -144,10 +203,12 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       vmPath: '/home/user/nodes-cno',
       setupScript: 'nodes-cno.sh',
       gate: 'make lint && make test',
+      baseBranch: 'dev',
       worktreeRoot: '/home/user/worktrees/cno',
       worktreeInit: ['cp /home/user/nodes-cno/.env .env'],
       ports: [8000],
       herdrLabel: 'cno',
+      deployWorkflow: 'staging.yml',
     },
   },
 })
@@ -193,7 +254,22 @@ export interface Secrets {
   BOAT_API_KEY: string
   /** Reusable, pre-approved, tagged Tailscale auth key; only needed when a VM first joins. */
   TS_AUTHKEY?: string
+  /** Linear OAuth application (client credentials): the controller's own identity. */
+  LINEAR_CLIENT_ID?: string
+  LINEAR_CLIENT_SECRET?: string
+  /** Fallback: a personal Linear API key (comments then look like yours). */
+  LINEAR_API_KEY?: string
+  /** Optional GitHub token for the controller's `gh` (boat's injected token is invisible to systemd). */
+  GH_TOKEN?: string
 }
+
+const OPTIONAL_SECRETS = [
+  'TS_AUTHKEY',
+  'LINEAR_CLIENT_ID',
+  'LINEAR_CLIENT_SECRET',
+  'LINEAR_API_KEY',
+  'GH_TOKEN',
+] as const
 
 /** KEY=value lines, `#` comments; the environment overrides the file. */
 export function parseEnvFile(text: string): Record<string, string> {
@@ -216,9 +292,15 @@ export function loadSecrets(p: Paths, env: NodeJS.ProcessEnv = process.env): Sec
     )
   }
   registerSecret(key)
-  const ts = env.TS_AUTHKEY || fromFile.TS_AUTHKEY
-  registerSecret(ts)
-  return { BOAT_API_KEY: key, TS_AUTHKEY: ts || undefined }
+  const out: Secrets = { BOAT_API_KEY: key }
+  for (const name of OPTIONAL_SECRETS) {
+    const v = env[name] || fromFile[name]
+    if (v) {
+      registerSecret(v)
+      out[name] = v
+    }
+  }
+  return out
 }
 
 /** Which configured repo does the git checkout at `cwd` belong to? */

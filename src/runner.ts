@@ -1,5 +1,5 @@
 import { runCommand } from './boat.js'
-import { footer, readBrief, vmBriefPath, vmTaskDir } from './brief.js'
+import { footer, readBrief, vmBriefPath, vmTaskDir, type FooterOptions } from './brief.js'
 import type { RepoConfig } from './config.js'
 import type { Ctx } from './context.js'
 import { OarError } from './errors.js'
@@ -18,6 +18,8 @@ export interface HerdrHandle {
 export interface DispatchOptions {
   reuseBranch?: boolean
   log: (line: string) => void
+  /** Extra footer rules (the factory adds PR naming and the question convention). */
+  footer?: FooterOptions
 }
 
 export interface DispatchResult {
@@ -158,7 +160,7 @@ export async function dispatchHerdr(
   }
 
   // 2. brief + task.json on the VM
-  const brief = `${readBrief(task.briefPath).trimEnd()}\n${footer(task, repo)}`
+  const brief = `${readBrief(task.briefPath).trimEnd()}\n${footer(task, repo, opts.footer)}`
   await ctx.boat.writeFile(id, vmBriefPath(task.id), brief)
   await ctx.boat.writeFile(
     id,
@@ -243,40 +245,14 @@ export async function dispatchHerdr(
 
   // 8. hand over the brief
   const prompt = `Read ${vmBriefPath(task.id)} and execute it. Restate the goal and the gate in one line first.`
-  let note: string | undefined
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      await machine.call(
-        ['agent', 'prompt', name, prompt, '--wait', '--until', 'working', '--timeout', '20000'],
-        undefined,
-        40_000,
-      )
-      note = undefined
-      break
-    } catch (e) {
-      if (e instanceof HerdrError && e.code === 'agent_blocked') {
-        const screen = await machine.read(name, 40, 'visible').catch(() => '')
-        throw new OarError(
-          'blocked',
-          `agent is waiting at a dialog:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
-          `oar task keys ${task.id} enter   or   oar task attach ${task.id}`,
-        )
-      }
-      if (!(e instanceof HerdrError) || !/stalled|timeout/.test(e.code)) throw e
-      // Did the text land? Working, or our brief path visible on screen, means yes.
-      const info = await machine.agent(name)
-      const screen = await machine.read(name, 60, 'visible').catch(() => '')
-      if (info?.agent_status === 'working' || screen.includes(vmBriefPath(task.id))) {
-        note = undefined
-        break
-      }
-      note = `prompt sent but not confirmed (${e.code}); check with oar task read ${task.id}`
-      if (attempt === 1) {
-        log('prompt did not land; retrying once')
-        await new Promise((r) => setTimeout(r, 3_000))
-      }
-    }
-  }
+  const landed = await promptTarget(machine, name, prompt, {
+    marker: vmBriefPath(task.id),
+    log,
+    taskId: task.id,
+  })
+  const note = landed
+    ? undefined
+    : `prompt sent but not confirmed; check with oar task read ${task.id}`
 
   return {
     handle: {
@@ -288,6 +264,58 @@ export async function dispatchHerdr(
     },
     note,
   }
+}
+
+interface PromptTargetOptions {
+  /** Text whose presence on the screen proves the prompt landed (default: the prompt's first line). */
+  marker?: string
+  log?: (l: string) => void
+  taskId?: string
+}
+
+/**
+ * Send a prompt and require Herdr to see the agent start working (retry once, screen check).
+ * Returns false when it was sent but never confirmed; throws `blocked` at a dialog.
+ */
+async function promptTarget(
+  machine: HerdrMachine,
+  target: string,
+  text: string,
+  opts: PromptTargetOptions = {},
+): Promise<boolean> {
+  const marker = opts.marker ?? (text.split('\n')[0] ?? text).slice(0, 60)
+  const hint = opts.taskId
+    ? `oar task keys ${opts.taskId} enter   or   oar task attach ${opts.taskId}`
+    : undefined
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await machine.call(
+        ['agent', 'prompt', target, text, '--wait', '--until', 'working', '--timeout', '20000'],
+        undefined,
+        40_000,
+      )
+      return true
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === 'agent_blocked') {
+        const screen = await machine.read(target, 40, 'visible').catch(() => '')
+        throw new OarError(
+          'blocked',
+          `agent is waiting at a dialog:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
+          hint,
+        )
+      }
+      if (!(e instanceof HerdrError) || !/stalled|timeout/.test(e.code)) throw e
+      // Did the text land? Working, or the marker visible on screen, means yes.
+      const info = await machine.agent(target)
+      const screen = await machine.read(target, 60, 'visible').catch(() => '')
+      if (info?.agent_status === 'working' || screen.includes(marker)) return true
+      if (attempt === 1) {
+        opts.log?.('prompt did not land; retrying once')
+        await new Promise((r) => setTimeout(r, 3_000))
+      }
+    }
+  }
+  return false
 }
 
 export type LiveAgent = AgentStatus | 'exited'
@@ -340,6 +368,55 @@ export async function steerAgent(
   await machine.call(['agent', 'prompt', agentTarget(handle, info), text])
 }
 
+/**
+ * Prompt an agent that is ready for input. With `confirm`, Herdr must observe it start working
+ * (dispatch-style retry and screen check); without it the write is only acknowledged, which is
+ * right for steering an agent that is already working.
+ */
+export async function promptAgent(
+  ctx: Ctx,
+  repo: RepoConfig,
+  handle: HerdrHandle,
+  text: string,
+  opts: { confirm?: boolean; marker?: string; log?: (l: string) => void } = {},
+): Promise<boolean> {
+  const machine = new HerdrMachine(ctx.exec, repo.herdrLabel)
+  const { status, info } = await agentState(ctx, repo, handle)
+  if (status === 'exited') throw new OarError('herdr', 'the agent is gone', 'oar task resume <id>')
+  const target = agentTarget(handle, info)
+  if (status === 'blocked') {
+    const screen = await machine.read(target, 30, 'visible').catch(() => '')
+    throw new OarError(
+      'blocked',
+      `agent is at a dialog; answer it first:\n${screen.trim().split('\n').slice(-10).join('\n')}`,
+      'oar task keys <id> enter|esc|…',
+    )
+  }
+  if (!opts.confirm || status === 'working') {
+    await machine.call(['agent', 'prompt', target, text])
+    return true
+  }
+  return promptTarget(machine, target, text, { marker: opts.marker, log: opts.log })
+}
+
+/** Interrupt whatever the agent is doing and close its pane. Best effort; never throws. */
+export async function stopAgent(ctx: Ctx, repo: RepoConfig, handle: HerdrHandle): Promise<void> {
+  const machine = new HerdrMachine(ctx.exec, repo.herdrLabel)
+  const { status, info } = await agentState(ctx, repo, handle).catch(() => ({
+    status: 'exited' as LiveAgent,
+    info: null,
+  }))
+  if (status !== 'exited') {
+    const target = agentTarget(handle, info)
+    for (let i = 0; i < 2; i++) {
+      await machine.call(['agent', 'send-keys', target, 'ctrl+c']).catch(() => undefined)
+      await new Promise((r) => setTimeout(r, 700))
+    }
+  }
+  // VERIFY: `pane close` is the Herdr 0.9.3 command to drop a pane; errors are ignored.
+  await machine.call(['pane', 'close', handle.paneId], undefined, 30_000).catch(() => undefined)
+}
+
 export async function sendKeys(
   ctx: Ctx,
   repo: RepoConfig,
@@ -365,14 +442,19 @@ export async function resumeHerdr(
   sandboxId: string,
   handle: HerdrHandle,
   log: (l: string) => void,
+  message?: string,
 ): Promise<HerdrHandle> {
   const machine = new HerdrMachine(ctx.exec, repo.herdrLabel)
   const byPane = await machine.agent(handle.paneId)
+  const servicesNote = repo.services ? `Restart services with \`${repo.services}\` if needed. ` : ''
   if (byPane) {
     const target = byPane.name === handle.agentName ? handle.agentName : handle.paneId
     await machine.call(['agent', 'rename', handle.paneId, handle.agentName]).catch(() => undefined)
-    const msg = `The VM was stopped and resumed. ${repo.services ? `Restart services with \`${repo.services}\` if needed. ` : ''}Continue executing ${vmBriefPath(task.id)}; the gate and the finish steps still apply.`
-    await machine.call(['agent', 'prompt', target, msg])
+    const msg =
+      message ??
+      `The VM was stopped and resumed. ${servicesNote}Continue executing ${vmBriefPath(task.id)}; the gate and the finish steps still apply.`
+    if (byPane.agent_status === 'working') await machine.call(['agent', 'prompt', target, msg])
+    else await promptTarget(machine, target, msg, { log, taskId: task.id })
     log(`resumed agent in pane ${handle.paneId}`)
     return handle
   }
@@ -407,12 +489,15 @@ export async function resumeHerdr(
     undefined,
     120_000,
   )
-  await machine.call([
-    'agent',
-    'prompt',
+  await settleDialogs(machine, name, task.id, log).catch(() => undefined)
+  await new Promise((r) => setTimeout(r, 1_500))
+  await promptTarget(
+    machine,
     name,
-    `The VM was stopped and resumed and this is a fresh pane. Continue executing ${vmBriefPath(task.id)}; the gate and the finish steps still apply.`,
-  ])
+    message ??
+      `The VM was stopped and resumed and this is a fresh pane. ${servicesNote}Continue executing ${vmBriefPath(task.id)}; the gate and the finish steps still apply.`,
+    { log, taskId: task.id },
+  )
   log(`recreated agent ${name} in pane ${paneId}`)
   return {
     ...handle,

@@ -35,11 +35,27 @@ export function templateFor(repoName: string, repo: RepoConfig, slug: string): s
     .replace('<gate>', repo.gate)
 }
 
+export interface FooterOptions {
+  /** Extra rule lines (markdown list items) inserted before the finish steps. */
+  extra?: string[]
+  /** Replaces the default "when blocked" rule (the factory relays questions instead). */
+  blockedRule?: string
+  /** Text for the PR title placeholder, e.g. `ENG-12: <one line>`. */
+  prTitle?: string
+  /** Lines added to the PR body requirement, e.g. `Fixes ENG-12` on the first line. */
+  prBody?: string
+}
+
 /** The part oar owns: where to work, how to finish. Appended on dispatch, never stored in the user's brief. */
-export function footer(task: Task, repo: RepoConfig): string {
+export function footer(task: Task, repo: RepoConfig, opts: FooterOptions = {}): string {
   const servicesNote = repo.services
     ? `- Services do not survive a VM stop. If something is missing (a database, a dev server), start it with \`${repo.services}\` instead of debugging.`
     : '- Services do not survive a VM stop; start what you need before debugging a missing one.'
+  const blocked =
+    opts.blockedRule ??
+    '- When blocked, do not wait for me: leave a `TODO(danish):` line in the PR body and continue with the rest. Ask only when a wrong guess would waste the whole task.'
+  const title = opts.prTitle ?? '<one line>'
+  const body = `where the body has: ${opts.prBody ? `${opts.prBody}; then ` : ''}what changed, which checks ran, open TODOs.`
   return [
     '',
     '---',
@@ -49,14 +65,24 @@ export function footer(task: Task, repo: RepoConfig): string {
     `- Gate before you stop: \`${repo.gate}\` must pass.`,
     servicesNote,
     '- Commit as you go with clear messages. Do not force-push.',
-    '- When blocked, do not wait for me: leave a `TODO(danish):` line in the PR body and continue with the rest. Ask only when a wrong guess would waste the whole task.',
+    blocked,
+    ...(opts.extra ?? []),
     '- When the gate is green, finish in this order and do not skip a step:',
     `  1. \`git push -u origin ${task.branch}\``,
-    `  2. \`gh pr create --draft --base ${repo.baseBranch} --head ${task.branch} --title "<one line>" --body-file <file>\` where the body has: what changed, which checks ran, open TODOs.`,
+    `  2. \`gh pr create --draft --base ${repo.baseBranch} --head ${task.branch} --title "${title}" --body-file <file>\` ${body}`,
     `  3. \`touch ${vmDoneMarker(task.id)}\``,
     '  4. Reply with the PR URL and a three-line summary.',
     '',
   ].join('\n')
+}
+
+/** Write a brief given as text (the factory builds it from a Linear issue). Returns the path. */
+export function writeBrief(p: Paths, id: string, text: string): string {
+  const dir = join(p.tasksDir, id)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, 'brief.md')
+  writeFileSync(path, text.endsWith('\n') ? text : `${text}\n`)
+  return path
 }
 
 export interface BriefSource {

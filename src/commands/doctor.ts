@@ -40,13 +40,15 @@ export async function doctor(
     existsSync(ctx.paths.pubFile),
     existsSync(ctx.paths.pubFile) ? ctx.paths.pubFile : 'created on first vm up',
   )
-  push('herdr on Mac', await localHerdr.installed(ctx.exec), '')
+  const here = process.platform === 'darwin' ? 'on Mac' : 'here'
+  push(`herdr ${here}`, await localHerdr.installed(ctx.exec), '')
   push(
-    'gh on Mac',
+    `gh ${here}`,
     await macGhOk(ctx.exec),
     'gh auth refresh -h github.com -s repo,workflow (VM gh is used as fallback)',
   )
-  push('osascript', await commandExists(ctx.exec, 'osascript'), 'notifications')
+  if (process.platform === 'darwin')
+    push('osascript', await commandExists(ctx.exec, 'osascript'), 'notifications')
   const ts = ctx.config.tailscale
   let tsPeers: Record<string, { online: boolean; ip?: string }> = {}
   if (ts.enabled) {
