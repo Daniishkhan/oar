@@ -164,8 +164,9 @@ export async function doctor(
       )
       push(
         `${name}: playwright browsers`,
-        Boolean(d.pw),
-        d.pw || 'none under ~/.local/share/ms-playwright',
+        Boolean(d.pw) || !cfg.playwright,
+        d.pw ||
+          (cfg.playwright ? 'none under ~/.local/share/ms-playwright' : 'not needed by this repo'),
       )
       push(
         `${name}: linger`,

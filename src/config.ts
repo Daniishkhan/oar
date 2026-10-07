@@ -61,6 +61,8 @@ export const RepoSchema = z.object({
   services: z.string().optional(),
   ports: z.array(z.number().int().positive()).default([]),
   herdrLabel: z.string().min(1),
+  /** The repo's suites need Playwright's own browsers (doctor checks they survive resumes). */
+  playwright: z.boolean().default(false),
 })
 export type RepoConfig = z.infer<typeof RepoSchema>
 
@@ -133,6 +135,7 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       services: 'pnpm db:up',
       ports: [3000],
       herdrLabel: 'engine',
+      playwright: true,
     },
     cno: {
       remoteMatch: 'nodes-cno|Synapse-Django',
