@@ -199,6 +199,8 @@ export async function observeTask(ctx: Ctx, task: Task): Promise<Observation> {
     t.status = status
     if (pr) t.pr = pr
     t.lastAgentStatus = agent === 'exited' ? t.lastAgentStatus : agent
+    if (agent === 'working' && t.note?.startsWith('prompt sent but not confirmed'))
+      t.note = undefined
     if ((status === 'done' || status === 'done-no-pr') && !t.finishedAt) t.finishedAt = nowIso()
     const rec = requireVm(s, task.repo)
     rec.lastSeenState = vmState

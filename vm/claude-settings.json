@@ -11,6 +11,9 @@
     "BASH_DEFAULT_TIMEOUT_MS": "600000"
   },
   "modelSettings": {
-    "claude-fable-5-1": { "effortLevel": "xhigh" }
-  }
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
+    }
+  },
+  "tui": "fullscreen"
 }

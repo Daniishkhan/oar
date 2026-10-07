@@ -45,6 +45,85 @@ async function uniqueAgentName(
   throw new OarError('herdr', `agent name ${wanted} is taken on ${machine.label}`)
 }
 
+/** First-run and permission dialogs Claude may show before it is usable, and the key that dismisses each. */
+const DIALOGS: Array<{ re: RegExp; key: string; label: string }> = [
+  { re: /fullscreen renderer/i, key: 'esc', label: 'fullscreen renderer prompt' },
+  { re: TRUST_DIALOG, key: 'enter', label: 'trust/bypass prompt' },
+]
+
+/** Answer known startup dialogs until the agent is idle; throw `blocked` with the screen otherwise. */
+async function settleDialogs(
+  machine: HerdrMachine,
+  target: string,
+  taskId: string,
+  log: (l: string) => void,
+): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const info = await machine.agent(target)
+    if (info && (info.agent_status === 'idle' || info.agent_status === 'done')) return
+    const screen = await machine.read(target, 40, 'visible').catch(() => '')
+    const dialog = DIALOGS.find((d) => d.re.test(screen))
+    if (!dialog) {
+      if (!info || info.agent_status === 'working') return
+      throw new OarError(
+        'blocked',
+        `Claude is at a dialog oar does not know in ${target}:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
+        `oar task keys ${taskId} <key>   or   oar task attach ${taskId}`,
+      )
+    }
+    log(`answering ${dialog.label} with ${dialog.key}`)
+    await machine.call(['agent', 'send-keys', target, dialog.key])
+    await machine
+      .call(['agent', 'wait', target, '--until', 'idle', '--timeout', '20000'], undefined, 30_000)
+      .catch(() => undefined)
+  }
+  throw new OarError(
+    'blocked',
+    `Claude in ${target} is still not idle after answering its dialogs`,
+    `oar task attach ${taskId}`,
+  )
+}
+
+async function createWorktree(
+  machine: HerdrMachine,
+  task: Task,
+  repo: RepoConfig,
+  log: (l: string) => void,
+): Promise<Created> {
+  const wtArgs = [
+    'worktree',
+    'create',
+    '--cwd',
+    repo.vmPath,
+    '--branch',
+    task.branch,
+    '--base',
+    `origin/${repo.baseBranch}`,
+    '--path',
+    task.worktreePath,
+    '--label',
+    task.slug,
+    '--no-focus',
+  ]
+  try {
+    return await machine.call(wtArgs, Created, 120_000)
+  } catch (e) {
+    if (!(e instanceof HerdrError)) throw e
+    const text = `${e.code} ${e.message}`
+    if (/trust/i.test(text))
+      return machine.call([...wtArgs, '--trust-repository'], Created, 120_000)
+    if (/exist|already/i.test(text)) {
+      log(`worktree ${task.worktreePath} already exists; opening it`)
+      return machine.call(
+        ['worktree', 'open', '--path', task.worktreePath, '--no-focus'],
+        Created,
+        120_000,
+      )
+    }
+    throw e
+  }
+}
+
 /** Runs interactive Claude in a Herdr pane on the VM, in its own worktree, and points it at the brief. */
 export async function dispatchHerdr(
   ctx: Ctx,
@@ -88,115 +167,115 @@ export async function dispatchHerdr(
   )
   log(`brief written to ${vmBriefPath(task.id)}`)
 
-  // 3. worktree + workspace in Herdr
-  const wtArgs = [
-    'worktree',
-    'create',
-    '--cwd',
-    repo.vmPath,
-    '--branch',
-    task.branch,
-    '--base',
-    `origin/${repo.baseBranch}`,
-    '--path',
-    task.worktreePath,
-    '--label',
-    task.slug,
-    '--no-focus',
-  ]
-  let created: Created
-  try {
-    created = await machine.call(wtArgs, Created, 120_000)
-  } catch (e) {
-    if (e instanceof HerdrError && /trust/i.test(`${e.code} ${e.message}`)) {
-      created = await machine.call([...wtArgs, '--trust-repository'], Created, 120_000)
-    } else throw e
-  }
-  const paneId = created.root_pane.pane_id
-  log(
-    `worktree ${task.worktreePath} in workspace ${created.workspace.workspace_id}, pane ${paneId}`,
+  // 3. a pane from an earlier attempt is reused; otherwise worktree + workspace in Herdr
+  const existing = (await machine.agents().catch(() => [] as AgentInfo[])).find(
+    (a) => a.name === task.id || a.cwd === task.worktreePath,
   )
-
-  // 4. per-worktree init (deps, .env)
-  if (repo.worktreeInit.length) {
-    const init = await runCommand(ctx.boat, id, repo.worktreeInit.join(' && '), {
-      cwd: task.worktreePath,
-      timeoutSeconds: 900,
-    })
-    if (init.exitCode !== 0) {
-      throw new OarError(
-        'boat',
-        `worktree init failed (exit ${init.exitCode}): ${init.stderr.trim().split('\n').slice(-5).join(' | ')}`,
-      )
+  let created: Created
+  let paneId: string
+  if (existing) {
+    paneId = existing.pane_id
+    created = {
+      workspace: { workspace_id: existing.workspace_id ?? '' },
+      tab: existing.tab_id ? { tab_id: existing.tab_id } : undefined,
+      root_pane: { pane_id: paneId },
     }
-    log('worktree initialised')
-  }
-
-  // 5. no trust dialog for the new cwd
-  await runCommand(ctx.boat, id, trustScript(task.worktreePath), { timeoutSeconds: 60 })
-
-  // 6-7. start Claude with a unique name
-  const name = await uniqueAgentName(machine, task.id, paneId)
-  const startArgs = [
-    'agent',
-    'start',
-    name,
-    '--kind',
-    'claude',
-    '--pane',
-    paneId,
-    '--timeout',
-    '90000',
-    '--',
-    '--name',
-    name,
-    '--remote-control',
-    name,
-  ]
-  try {
-    await machine.call(startArgs, undefined, 120_000)
-  } catch (e) {
-    if (!(e instanceof HerdrError) || e.code !== 'agent_not_ready') throw e
-    const screen = await machine.read(name, 40, 'visible').catch(() => '')
-    if (!TRUST_DIALOG.test(screen)) {
-      throw new OarError(
-        'blocked',
-        `Claude started but is not ready in pane ${paneId}:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
-        `oar task attach ${task.id}`,
-      )
-    }
-    await machine.call(['agent', 'send-keys', name, 'enter'])
-    await machine.call(
-      ['agent', 'wait', name, '--until', 'idle', '--timeout', '30000'],
-      undefined,
-      45_000,
+    log(`reusing pane ${paneId} (agent ${existing.name ?? 'unnamed'}, ${existing.agent_status})`)
+  } else {
+    created = await createWorktree(machine, task, repo, log)
+    paneId = created.root_pane.pane_id
+    log(
+      `worktree ${task.worktreePath} in workspace ${created.workspace.workspace_id}, pane ${paneId}`,
     )
+
+    // 4. per-worktree init (deps, .env)
+    if (repo.worktreeInit.length) {
+      const init = await runCommand(ctx.boat, id, repo.worktreeInit.join(' && '), {
+        cwd: task.worktreePath,
+        timeoutSeconds: 900,
+      })
+      if (init.exitCode !== 0) {
+        throw new OarError(
+          'boat',
+          `worktree init failed (exit ${init.exitCode}): ${init.stderr.trim().split('\n').slice(-5).join(' | ')}`,
+        )
+      }
+      log('worktree initialised')
+    }
+
+    // 5. no trust dialog for the new cwd
+    await runCommand(ctx.boat, id, trustScript(task.worktreePath), { timeoutSeconds: 60 })
   }
+
+  // 6-7. start Claude with a unique name, unless it is already in the pane
+  const name = existing?.name ?? (await uniqueAgentName(machine, task.id, paneId))
+  if (!existing) {
+    const startArgs = [
+      'agent',
+      'start',
+      name,
+      '--kind',
+      'claude',
+      '--pane',
+      paneId,
+      '--timeout',
+      '90000',
+      '--',
+      '--name',
+      name,
+      '--remote-control',
+      name,
+    ]
+    try {
+      await machine.call(startArgs, undefined, 120_000)
+    } catch (e) {
+      const notReady =
+        e instanceof HerdrError &&
+        (e.code === 'agent_not_ready' || /timed out|timeout/i.test(`${e.code} ${e.message}`))
+      if (!notReady) throw e
+      log(`claude started but is not ready yet (${(e as HerdrError).code}); checking its screen`)
+    }
+  }
+  await settleDialogs(machine, name, task.id, log)
   log(`claude running as agent ${name}`)
+  // The TUI drops input while it re-renders after a dialog; give it a moment before the prompt.
+  await new Promise((r) => setTimeout(r, existing ? 3_000 : 1_500))
 
   // 8. hand over the brief
   const prompt = `Read ${vmBriefPath(task.id)} and execute it. Restate the goal and the gate in one line first.`
   let note: string | undefined
-  try {
-    await machine.call(
-      ['agent', 'prompt', name, prompt, '--wait', '--until', 'working', '--timeout', '20000'],
-      undefined,
-      40_000,
-    )
-  } catch (e) {
-    if (e instanceof HerdrError && e.code === 'agent_blocked') {
-      const screen = await machine.read(name, 40, 'visible').catch(() => '')
-      throw new OarError(
-        'blocked',
-        `agent is waiting at a dialog:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
-        `oar task keys ${task.id} enter   or   oar task attach ${task.id}`,
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await machine.call(
+        ['agent', 'prompt', name, prompt, '--wait', '--until', 'working', '--timeout', '20000'],
+        undefined,
+        40_000,
       )
-    }
-    if (e instanceof HerdrError && /stalled|timeout/.test(e.code)) {
+      note = undefined
+      break
+    } catch (e) {
+      if (e instanceof HerdrError && e.code === 'agent_blocked') {
+        const screen = await machine.read(name, 40, 'visible').catch(() => '')
+        throw new OarError(
+          'blocked',
+          `agent is waiting at a dialog:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
+          `oar task keys ${task.id} enter   or   oar task attach ${task.id}`,
+        )
+      }
+      if (!(e instanceof HerdrError) || !/stalled|timeout/.test(e.code)) throw e
+      // Did the text land? Working, or our brief path visible on screen, means yes.
       const info = await machine.agent(name)
-      if (info?.agent_status !== 'working')
-        note = `prompt sent but not confirmed (${e.code}); check with oar task read ${task.id}`
-    } else throw e
+      const screen = await machine.read(name, 60, 'visible').catch(() => '')
+      if (info?.agent_status === 'working' || screen.includes(vmBriefPath(task.id))) {
+        note = undefined
+        break
+      }
+      note = `prompt sent but not confirmed (${e.code}); check with oar task read ${task.id}`
+      if (attempt === 1) {
+        log('prompt did not land; retrying once')
+        await new Promise((r) => setTimeout(r, 3_000))
+      }
+    }
   }
 
   return {
@@ -298,7 +377,7 @@ export async function resumeHerdr(
     return handle
   }
   const opened = await machine.call(
-    ['worktree', 'open', '--cwd', repo.vmPath, '--branch', task.branch, '--no-focus'],
+    ['worktree', 'open', '--path', task.worktreePath, '--no-focus'],
     Created,
     120_000,
   )
