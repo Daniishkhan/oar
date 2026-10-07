@@ -48,6 +48,9 @@ export const realExec: Exec = {
         if (timer) clearTimeout(timer)
         resolve({ code: code ?? 1, stdout, stderr })
       })
+      // A child that never reads stdin (`systemctl is-active`, `true`) closes it first; the
+      // resulting EPIPE on our end is noise, not a failure, and unhandled it kills the process.
+      child.stdin.on('error', () => undefined)
       child.stdin.end(opts.input ?? '')
     })
   },

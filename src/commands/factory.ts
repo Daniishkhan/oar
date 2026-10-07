@@ -191,6 +191,7 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
 
   // 3. the controller's own setup script (herdr, units, oar symlink)
   const code = await ssh.interactive(ctx.exec, alias, 'bash /home/user/oar/app/setup/controller.sh')
+  // (controller.sh links ~/oar/setup and ~/oar/vm into the bundle, which tailscale.sh relies on)
   if (code !== 0)
     throw new OarError('ssh', `controller.sh exited ${code}`, 're-run oar factory setup')
 
@@ -224,11 +225,12 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
   for (const repo of Object.keys(ctx.config.repos)) {
     if (!vms[repo]) continue
     const label = repoConfig(ctx.config, repo).herdrLabel
-    await ssh.interactive(ctx.exec, via, `~/.local/bin/oar factory pin ${shq(repo)}`)
+    const env = 'export PATH=$HOME/.local/bin:$PATH;'
+    await ssh.interactive(ctx.exec, via, `${env} oar factory pin ${shq(repo)}`)
     await ssh.interactive(
       ctx.exec,
       via,
-      `~/.local/bin/herdr machine list --json 2>/dev/null | grep -q ${shq(`"${label}"`)} || ~/.local/bin/herdr machine add ${shq(sshAlias(repo))} --label ${shq(label)} --remote-session default`,
+      `${env} herdr machine list --json 2>/dev/null | grep -q ${shq(`"${label}"`)} || herdr machine add ${shq(sshAlias(repo))} --label ${shq(label)} --remote-session default`,
     )
   }
 
