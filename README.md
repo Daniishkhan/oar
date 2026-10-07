@@ -37,7 +37,7 @@ agent state, the PR on GitHub, and the done marker on the VM.
 3. In the boat dashboard: connect GitHub and install boat's GitHub App on the organisation, then
    attach each repo to its environment (`engine`, `cno`) and upload the repo's `.env` as a secret
    file. `oar doctor` checks the rest.
-4. `oar vm new engine` (interactive: setup output, `claude auth login`, `herdr machine add`).
+4. `oar vm new engine` (interactive: setup output, `claude auth login`, `herdr machine add`). Later logins: `oar vm login engine` (and `--codex`), which also saves them for resumes.
 
 ## Playbooks
 
@@ -90,6 +90,7 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] Tailnet identity survives stop→resume with state under `/etc/tailscale`: same 100.x address, `ssh oar-engine` over the tailnet with boat's pinned host key, no re-pin (2026-10-07)
 - [x] `/srv/oar/chrome` profile, `~/.local/share/ms-playwright`, lingering and the agent-chrome unit survive stop→resume (2026-10-07)
 - [x] Inside a Herdr pane Claude sees DISPLAY/XDG_RUNTIME_DIR/DBUS and `browser`, `browser-headless`, `chrome-devtools`, `computer`, `graft` all connected (2026-10-07)
+- [x] boat removes `~/.claude/.credentials.json` and `~/.codex/auth.json` on resume when agent-credential passing is off; `oar-creds` keeps copies under `/srv/oar/creds`, restored at boot and by `oar vm up`; log in with `oar vm login <repo> [--codex]` so the copy is taken (found 2026-10-07 on the first engine resume)
 - [ ] Tailnet nodes are user-owned (full member access under the default policy); to isolate them, define `tag:oar` in the policy and re-join with `OAR_TS_TAGS=tag:oar`
 - [x] `herdr --machine` works again after the endpoint changes, without `machine reconnect` (2026-10-07, via the tailnet alias)
 - [x] `worktree create` result fields mirror `workspace create` (`workspace.workspace_id`, `tab.tab_id`, `root_pane.pane_id`) (2026-10-07)
