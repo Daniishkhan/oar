@@ -30,7 +30,11 @@ function controllerAlias(ctx: Ctx): string {
 /** Run the same `oar factory …` on the controller, stdio inherited (so `log -f` streams). */
 async function forward(ctx: Ctx, args: string[]): Promise<number> {
   const alias = controllerAlias(ctx)
-  return ssh.interactive(ctx.exec, alias, `~/.local/bin/oar factory ${args.map(shq).join(' ')}`)
+  return ssh.interactive(
+    ctx.exec,
+    alias,
+    `export PATH=$HOME/.local/bin:$PATH; oar factory ${args.map(shq).join(' ')}`,
+  )
 }
 
 async function remote(ctx: Ctx, command: string, timeoutMs = 120_000): Promise<string> {
