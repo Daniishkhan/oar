@@ -1,4 +1,4 @@
-import { cleanTail, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   factoryFooter,
   issueBrief,
