@@ -86,8 +86,12 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] `sshKey` returns `sshEndpoint` (`host:port`, NATed) and a single-line `ssh-ed25519` `hostKey` (2026-10-07, engine)
 - [ ] PATCH `ttlSeconds` anchor (now vs last resume) — `oar vm keep` logs the correction when it happens
 - [x] `herdr-server.service` is enabled and active after setup with the socket at `~/.config/herdr/herdr.sock` (2026-10-07)
-- [ ] `herdr-server.service` restores the session after a resume and `herdr --remote` attaches to it
-- [ ] `herdr --machine` works again after the endpoint changes, without `machine reconnect`
+- [x] `herdr-server.service` comes back after a resume (oar nudges it when `--machine` is not yet answering) (2026-10-07)
+- [x] Tailnet identity survives stop→resume with state under `/etc/tailscale`: same 100.x address, `ssh oar-engine` over the tailnet with boat's pinned host key, no re-pin (2026-10-07)
+- [x] `/srv/oar/chrome` profile, `~/.local/share/ms-playwright`, lingering and the agent-chrome unit survive stop→resume (2026-10-07)
+- [x] Inside a Herdr pane Claude sees DISPLAY/XDG_RUNTIME_DIR/DBUS and `browser`, `browser-headless`, `chrome-devtools`, `computer`, `graft` all connected (2026-10-07)
+- [ ] Tailnet nodes are user-owned (full member access under the default policy); to isolate them, define `tag:oar` in the policy and re-join with `OAR_TS_TAGS=tag:oar`
+- [x] `herdr --machine` works again after the endpoint changes, without `machine reconnect` (2026-10-07, via the tailnet alias)
 - [x] `worktree create` result fields mirror `workspace create` (`workspace.workspace_id`, `tab.tab_id`, `root_pane.pane_id`) (2026-10-07)
 - [x] the `~/.claude.json` pre-trust suppresses the trust dialog on the VM; what did appear was the
       fullscreen-renderer prompt, now pre-set via `tui` in `vm/claude-settings.json` and answered by the runner (2026-10-07)
