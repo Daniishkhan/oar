@@ -136,7 +136,7 @@ export async function doctor(
         codexOk,
         codexOk
           ? codex!.stdout.trim()
-          : `oar vm login ${name} --codex` (or scp ~/.codex/auth.json ${sshAlias(name)}:~/.codex/auth.json && oar-creds save),
+          : oar vm login ${name} --codex, or copy ~/.codex/auth.json to the VM and run oar-creds save,
       )
       const repoDir = await runCommand(
         ctx.boat,
