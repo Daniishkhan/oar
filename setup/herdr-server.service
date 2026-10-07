@@ -1,0 +1,17 @@
+[Unit]
+Description=Herdr server (oar) so `herdr --machine` works right after a resume
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=user
+Environment=HOME=/home/user
+Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TERM=xterm-256color
+WorkingDirectory=/home/user
+ExecStart=/home/user/.local/bin/herdr server
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

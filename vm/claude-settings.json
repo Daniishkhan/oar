@@ -1,0 +1,16 @@
+{
+  "model": "fable",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": ["Bash(graft:*)", "Bash(npx graft:*)"]
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "remoteControlAtStartup": true,
+  "env": {
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5-5",
+    "BASH_DEFAULT_TIMEOUT_MS": "600000"
+  },
+  "modelSettings": {
+    "claude-fable-5-1": { "effortLevel": "xhigh" }
+  }
+}
