@@ -201,10 +201,14 @@ export async function doctor(
             ['ping', '-c', '1', '--timeout', '5s', sshAlias(name)],
             { timeoutMs: 15_000 },
           )
+          const pong = ping.stdout.split('\n').find((l) => l.startsWith('pong'))
           push(
             `${name}: tailscale ping`,
-            ping.code === 0,
-            ping.stdout.trim().split('\n').pop() ?? ping.stderr.trim(),
+            Boolean(pong),
+            pong
+              ? pong.replace(/^pong from \S+ /, '') +
+                  (/via DERP/.test(pong) ? ' (relayed; direct path not available)' : ' (direct)')
+              : (ping.stderr.trim().split('\n').pop() ?? 'no pong'),
           )
           const sshOk = await ctx.exec.run(
             'ssh',

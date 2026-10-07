@@ -270,12 +270,12 @@ async function setupTailscale(
     via,
     `OAR_TS_HOSTNAME=${sshAlias(repo)} OAR_TS_OPTIONAL=${key ? 0 : 1} bash /home/user/oar/setup/tailscale.sh`,
   )
-  if (code !== 0)
-    throw new OarError(
-      'ssh',
-      `tailscale setup exited ${code}`,
-      'see the output above; TS_AUTHKEY in ~/.config/oar/env must be a reusable tagged key',
+  if (code !== 0) {
+    log(
+      `tailscale: join failed (exit ${code}); the VM stays reachable through boat's endpoint. A used-up or expired TS_AUTHKEY is the usual cause: generate a reusable key and re-run oar vm setup ${repo}`,
     )
+    return
+  }
   const ip = await runCommand(ctx.boat, id, 'tailscale ip -4', { timeoutSeconds: 30 }).catch(
     () => null,
   )
