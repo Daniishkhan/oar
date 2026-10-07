@@ -74,10 +74,16 @@ export async function doctor(
     const sb = await ctx.boat.get(vm.sandboxId).catch(() => null)
     const st = sb ? sandboxState(sb) : 'unreachable'
     push(`${name}: VM ${vm.sandboxId}`, Boolean(sb), st)
+    const profiles = machines.filter((m) => m.label === cfg.herdrLabel)
     push(
       `${name}: herdr machine '${cfg.herdrLabel}'`,
-      machines.some((m) => m.label === cfg.herdrLabel),
-      `herdr machine add ${sshAlias(name)} --label ${cfg.herdrLabel}`,
+      profiles.length === 1,
+      profiles.length > 1
+        ? `${profiles.length} profiles share this label, so herdr --machine refuses it: herdr machine remove ${profiles
+            .slice(1)
+            .map((m) => m.id)
+            .join(' ')}`
+        : `herdr machine add ${sshAlias(name)} --label ${cfg.herdrLabel}`,
     )
     if (sb && UP_STATES.has(st as never)) {
       const reach = await new HerdrMachine(ctx.exec, cfg.herdrLabel).reachable()
