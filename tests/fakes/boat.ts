@@ -9,7 +9,7 @@ import type {
   SshKeyResponse,
   UpdateSandboxRequest,
 } from '@boatdev/sdk'
-import type { BoatClient, CommandResult } from '../../src/boat.js'
+import type { BoatClient, CommandResult, DesktopInfo } from '../../src/boat.js'
 
 export interface FakeBoatOptions {
   now?: () => number
@@ -36,6 +36,8 @@ export class FakeBoat implements BoatClient {
   commands: Array<{ id: string; req: CommandRequest }> = []
   updates: Array<{ id: string; req: UpdateSandboxRequest }> = []
   snapshots: Array<{ id: string; name: string }> = []
+  desktops: Array<{ id: string; opts: unknown }> = []
+  bytes = new Map<string, Buffer>()
   anchors = new Map<string, number>()
   /** Commands answered by regex on the command text; first match wins. */
   commandRules: Array<{ re: RegExp; result: Partial<CommandResult> }> = []
@@ -171,6 +173,16 @@ export class FakeBoat implements BoatClient {
 
   async readFile(id: string, path: string): Promise<string | null> {
     return this.files.get(`${id}:${path}`) ?? null
+  }
+
+  async readFileBytes(id: string, path: string): Promise<Buffer | null> {
+    return this.bytes.get(`${id}:${path}`) ?? null
+  }
+
+  async desktop(id: string, opts: unknown = {}): Promise<DesktopInfo> {
+    this.require(id)
+    this.desktops.push({ id, opts })
+    return { url: `https://${id}-desktop.on.boat.dev/#t`, provisioning: false, mode: 'moonlight' }
   }
 
   async writeFile(id: string, path: string, content: string): Promise<void> {

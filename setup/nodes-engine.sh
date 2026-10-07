@@ -3,6 +3,7 @@
 # boat clones the repo and drops the secret file nodes-engine/.env before this runs.
 set -euxo pipefail
 export HOME="${HOME:-/home/user}"; export PATH="$HOME/.local/bin:$PATH"
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.local/share/ms-playwright"   # snapshotted; ~/.cache is not
 REPO="$HOME/nodes-engine"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "$HERE/common.sh"

@@ -1,5 +1,16 @@
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { readAsset } from '../assets.js'
-import { ensureDeadline, runCommand, sandboxState, waitForState, waitUp } from '../boat.js'
+import { CHROME_PROFILE, shotCommand, VM_SHOT_PATH } from '../desktop.js'
+import { commandExists } from '../exec.js'
+import {
+  ensureDeadline,
+  runCommand,
+  sandboxState,
+  waitDesktop,
+  waitForState,
+  waitUp,
+} from '../boat.js'
 import { loadSecrets, repoConfig, sshAlias, tailnetHost, type RepoConfig } from '../config.js'
 import type { Ctx } from '../context.js'
 import { shq } from '../exec.js'
@@ -200,6 +211,11 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
     ['vm/CLAUDE.md', readAsset('vm', 'CLAUDE.md')],
     ['vm/codex-config.toml', readAsset('vm', 'codex-config.toml')],
     ['setup/tailscale.sh', readAsset('setup', 'tailscale.sh')],
+    ['setup/desktop.sh', readAsset('setup', 'desktop.sh')],
+    ['setup/agent-chrome.service', readAsset('setup', 'agent-chrome.service')],
+    ['setup/oar-linger.service', readAsset('setup', 'oar-linger.service')],
+    ['vm/shot', readAsset('vm', 'shot')],
+    ['vm/pr-shot', readAsset('vm', 'pr-shot')],
   ]
   for (const [rel, content] of files) await ctx.boat.writeFile(id, `/home/user/oar/${rel}`, content)
   log(
@@ -264,6 +280,85 @@ async function setupTailscale(
   })
   const vm = requireVm(loadState(ctx.paths), repo)
   await refreshSsh(ctx, repo, vm, log)
+}
+
+/** A desktop-stream URL for the VM: Moonlight by default (clipboard, 60 fps), noVNC with `vnc` (phones, bad networks). */
+export async function vmDesktop(
+  ctx: Ctx,
+  repo: string,
+  opts: { vnc?: boolean; isPublic?: boolean; open?: boolean } = {},
+): Promise<string> {
+  if (opts.isPublic && !opts.vnc) throw new OarError('usage', '--public only works with --vnc')
+  const up = await ensureUp(ctx, repo, ctx.io.out)
+  const sb = await ctx.boat.get(up.vm.sandboxId)
+  if (sb.desktopAvailable === false)
+    throw new OarError(
+      'boat',
+      `the desktop is not available on ${up.vm.sandboxId}`,
+      'check the sandbox in the boat dashboard',
+    )
+  const d = await waitDesktop(ctx.boat, up.vm.sandboxId, {
+    vnc: opts.vnc,
+    publicAccess: opts.isPublic,
+  })
+  ctx.io.out(d.url!)
+  ctx.io.out(
+    opts.vnc
+      ? `noVNC over HTTPS${opts.isPublic ? ', no token: anyone with the link can control the desktop' : ''}; link valid about 10 minutes`
+      : 'Moonlight stream with clipboard; link valid about 10 minutes (use --vnc on a phone or a bad network)',
+  )
+  if (opts.open ?? ctx.io.isTTY) await ctx.exec.run('open', [d.url!]).catch(() => undefined)
+  return d.url!
+}
+
+/** Chrome-only stream of the agent's profile. CLI-only in boat, so this prints the recipe and runs it when `boat` exists here. */
+export async function vmBrowser(ctx: Ctx, repo: string): Promise<void> {
+  const up = await ensureUp(ctx, repo, ctx.io.out)
+  const id = up.vm.sandboxId
+  const recipe = `boat browser ${id} --profile ${CHROME_PROFILE}`
+  ctx.io.out(
+    `agent Chrome is already visible in \`oar vm desktop ${repo}\`. For boat's Chrome-only stream:`,
+  )
+  ctx.io.out(
+    `  oar vm ssh ${repo} -- sudo systemctl stop agent-chrome   # boat launches its own Chrome on the profile`,
+  )
+  ctx.io.out(`  ${recipe}`)
+  ctx.io.out(`  oar vm ssh ${repo} -- sudo systemctl start agent-chrome  # afterwards`)
+  if (!(await commandExists(ctx.exec, 'boat'))) return
+  await runCommand(ctx.boat, id, 'sudo systemctl stop agent-chrome', { timeoutSeconds: 30 })
+  try {
+    await ctx.exec.interactive('boat', ['browser', id, '--profile', CHROME_PROFILE])
+  } finally {
+    await runCommand(ctx.boat, id, 'sudo systemctl start agent-chrome', {
+      timeoutSeconds: 30,
+    }).catch(() => undefined)
+  }
+}
+
+/** Screenshot of the VM desktop (or one window), pulled to the Mac. */
+export async function vmShot(
+  ctx: Ctx,
+  repo: string,
+  opts: { out?: string; window?: string; open?: boolean } = {},
+): Promise<string> {
+  const up = await ensureUp(ctx, repo, ctx.io.out)
+  const id = up.vm.sandboxId
+  const r = await runCommand(ctx.boat, id, shotCommand(opts.window), { timeoutSeconds: 60 })
+  if (r.exitCode !== 0)
+    throw new OarError(
+      'boat',
+      `shot failed on the VM: ${(r.stderr || r.stdout).trim().split('\n').pop()}`,
+      `oar vm setup ${repo} installs it`,
+    )
+  const bytes = await ctx.boat.readFileBytes(id, VM_SHOT_PATH)
+  if (!bytes) throw new OarError('boat', `${VM_SHOT_PATH} was not written on the VM`)
+  const stamp = new Date(ctx.now()).toISOString().replace(/[-:]/g, '').replace(/\..*/, '')
+  const out = opts.out ?? join(ctx.paths.shotsDir, `${repo}-${stamp}.png`)
+  mkdirSync(join(out, '..'), { recursive: true })
+  writeFileSync(out, bytes)
+  ctx.io.out(out)
+  if (opts.open ?? ctx.io.isTTY) await ctx.exec.run('open', [out]).catch(() => undefined)
+  return out
 }
 
 /** Private preview over the tailnet: https://oar-<repo>.<suffix> → 127.0.0.1:<port> on the VM. */

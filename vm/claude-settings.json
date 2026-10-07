@@ -8,12 +8,16 @@
   "remoteControlAtStartup": true,
   "env": {
     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5-5",
-    "BASH_DEFAULT_TIMEOUT_MS": "600000"
+    "BASH_DEFAULT_TIMEOUT_MS": "600000",
+    "PLAYWRIGHT_BROWSERS_PATH": "/home/user/.local/share/ms-playwright",
+    "DISPLAY": ":0"
   },
   "modelSettings": {
     "claude-fable-5-1": {
       "effortLevel": "xhigh"
     }
   },
-  "tui": "fullscreen"
+  "tui": "fullscreen",
+  "enabledMcpjsonServers": ["nodes-desktop", "graft"],
+  "disabledMcpjsonServers": ["paper"]
 }

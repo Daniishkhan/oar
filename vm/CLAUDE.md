@@ -15,6 +15,31 @@ This is a disposable Linux VM. Nothing here is the developer's laptop.
 - If the user is away (Remote Control), prefer finishing with a push and a short summary
   over asking questions. Ask only when a wrong guess would waste the night.
 
+# Seeing things
+
+`DISPLAY=:0` is a real Xorg desktop at 1920x1080 that the developer may be watching live
+(`oar vm desktop`). There is one screen: run `wmctrl -l` before driving it, and if another task's
+window or the NODES app is busy there, do not click into it. One GUI, e2e or desktop run per VM at
+a time; everything else goes headless.
+
+- `browser` (MCP): Playwright on the persistent, signed-in agent Chrome (CDP :9222). Use it for
+  anything that needs logins or that should be visible. Never call `browser_close` on it.
+- `browser-headless` (MCP): an isolated headless Chrome for unattended or parallel checks.
+- `chrome-devtools` (MCP): console, network and performance on the agent Chrome.
+- `computer` (MCP, boat): screenshot + accessibility tree, click and type on any X window
+  (Electron, dialogs). `nodes-desktop` (project MCP) attaches to the NODES app on :9350.
+- `shot /tmp/oar/x.png [window]` grabs the screen or one window; view it with Read.
+- Screenshots belong in the PR body: `pr-shot <png> <label>` prints the markdown; fallback:
+  `git add -f test-results/oar/<slug>/*.png` as a separate last commit and say so.
+
+Electron (nodes-engine): `pnpm db:up` → `pnpm dev:services > /tmp/oar/services.log 2>&1 &` →
+`curl -s 127.0.0.1:4318/health` → `cd apps/desktop && pnpm exec electron-forge start --
+--remote-debugging-port=9350 > /tmp/oar/desktop.log 2>&1 &` → `curl -s 127.0.0.1:9350/json/list`.
+Ports 5173/5174/9350/4318 are fixed and `pnpm test:e2e` reuses any Vite already on 5173: check
+`ss -ltnp | grep -E ':(5173|5174|9350|4318) '` first and never stop a listener you did not start.
+Packaged app on Linux: `pnpm package` → `apps/desktop/out/NODES-linux-x64/NODES`; `pnpm test:desktop`
+runs headed on :0 (prefix `xvfb-run -a` when the screen is busy).
+
 # Graft code graph
 
 When a repository has a Graft index (`graft/.graph/wiring.json` at its root), use the `graft` CLI before opening or grepping source files:

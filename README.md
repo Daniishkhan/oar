@@ -63,7 +63,12 @@ VM and every suspended task; `oar task resume <id>` does one.
 
 **Look at the app.** `oar vm tunnel engine 3000` makes the VM's port 3000 `localhost:3000` on the
 Mac (OAuth callbacks and `ALLOWED_HOSTS` keep working). `oar vm preview cno 8000` gives a
-token-protected public URL for the phone. `boat desktop <id>` streams the VM's desktop.
+token-protected public URL for the phone; `oar vm serve cno 8000` a tailnet-only one.
+
+**Watch the agent.** `oar vm desktop engine` streams the VM's desktop (add `--vnc` on a phone),
+where the agent's persistent, signed-in Chrome lives; `oar vm shot engine --window Chrome` pulls a
+screenshot to the Mac. Agents get `browser`, `browser-headless`, `chrome-devtools` and boat's
+`computer` MCP servers, plus `shot`/`pr-shot` helpers; `vm/CLAUDE.md` tells them which to use.
 
 **Cost.** Default VM $0.036/h, free while stopped. Every create/resume gets a 12 h auto-stop;
 `oar vm keep <repo> 10` pushes it; `oar watch` extends it while a task is working, within the

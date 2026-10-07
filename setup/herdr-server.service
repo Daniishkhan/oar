@@ -8,6 +8,8 @@ User=user
 Environment=HOME=/home/user
 Environment=PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TERM=xterm-256color
+Environment=DISPLAY=:0
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/user/.local/share/ms-playwright
 WorkingDirectory=/home/user
 ExecStart=/home/user/.local/bin/herdr server
 Restart=on-failure

@@ -24,6 +24,13 @@ export function relHome(path: string): string {
   return path.startsWith(`${HOME}/`) ? path.slice(HOME.length + 1) : path
 }
 
+export interface DesktopInfo {
+  url: string | null
+  provisioning: boolean
+  mode?: string
+  message?: string
+}
+
 export interface CommandResult {
   exitCode: number | null
   stdout: string
@@ -48,6 +55,13 @@ export interface BoatClient {
   commandStatus(id: string, processId: number): Promise<CommandStatusResponse>
   /** null when the file does not exist. */
   readFile(id: string, path: string): Promise<string | null>
+  /** Raw bytes (PNG etc.); null when the file does not exist. */
+  readFileBytes(id: string, path: string): Promise<Buffer | null>
+  /** A fresh desktop-stream URL (Moonlight, or noVNC with `vnc`); valid about 10 minutes. */
+  desktop(
+    id: string,
+    opts?: { vnc?: boolean; theme?: 'light' | 'dark'; publicAccess?: boolean },
+  ): Promise<DesktopInfo>
   writeFile(id: string, path: string, content: string): Promise<void>
   usage(id: string, since?: string, until?: string): Promise<SandboxUsageResponse>
   saveNamedSnapshot(id: string, name: string): Promise<void>
@@ -117,6 +131,29 @@ export function realBoat(apiKey: string): BoatClient {
         return mapError(e)
       }
     },
+    readFileBytes: async (id, path) => {
+      try {
+        const r = await api.readFile({ sandboxId: id, path, encoding: 'base64' })
+        return Buffer.from(r.content, r.encoding === 'base64' ? 'base64' : 'utf8')
+      } catch (e) {
+        if (e instanceof ResponseError && e.response.status === 404) return null
+        return mapError(e)
+      }
+    },
+    desktop: (id, opts = {}) =>
+      guard(
+        api.desktop({
+          sandboxId: id,
+          vnc: (opts.vnc ? '1' : undefined) as never,
+          theme: opts.theme as never,
+          desktopRequest: { publicAccess: opts.publicAccess ?? false },
+        }),
+      ).then((r) => ({
+        url: r.desktopUrl ?? null,
+        provisioning: Boolean(r.provisioning),
+        mode: r.mode,
+        message: r.message,
+      })),
     writeFile: (id, path, content) =>
       guard(
         api.writeFile({ sandboxId: id, fileWriteRequest: { path, content, encoding: 'utf8' } }),
@@ -246,6 +283,23 @@ export async function runCommand(
     }
     if (Date.now() > deadline)
       return { exitCode: null, stdout: st.stdout, stderr: st.stderr, timedOut: true }
+  }
+}
+
+/** VNC desktops provision on first use; poll until a URL comes back. */
+export async function waitDesktop(
+  boat: BoatClient,
+  id: string,
+  opts: { vnc?: boolean; theme?: 'light' | 'dark'; publicAccess?: boolean },
+  timeoutMs = 90_000,
+): Promise<DesktopInfo> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const d = await boat.desktop(id, opts)
+    if (d.url && !d.provisioning) return d
+    if (Date.now() > deadline)
+      throw new OarError('boat', `desktop still provisioning: ${d.message ?? ''}`)
+    await sleep(2_000)
   }
 }
 

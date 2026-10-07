@@ -28,6 +28,9 @@ vm
   tunnel [repo] [ports...]      VM ports on localhost here (ssh -L)
   preview [repo] <port> [--public]   stable HTTPS URL (token-protected unless --public)
   serve [repo] <port> [--off]   private tailnet URL https://oar-<repo>.<tailnet> → the VM's port
+  desktop [repo] [--vnc] [--public] [--no-open]   stream the VM's desktop (watch the agent's Chrome)
+  browser [repo]                boat's Chrome-only stream of the agent profile (needs the boat CLI)
+  shot [repo] [--window name] [--out file] [--no-open]   screenshot of the VM desktop, saved locally
   setup [repo]                  re-copy setup/ and vm/ files and run the setup script
   snapshot [repo] <name>        named snapshot (boat new --from <name>)
   list
@@ -143,6 +146,39 @@ async function vmCmd(ctx: Ctx, args: string[]): Promise<number> {
     case 'setup': {
       const { values, positionals } = parse(rest, repoOpt)
       await vm.vmSetup(ctx, await repoArg(ctx, positionals[0], values.repo))
+      return 0
+    }
+    case 'desktop': {
+      const { values, positionals } = parse(rest, {
+        ...repoOpt,
+        vnc: { type: 'boolean' },
+        public: { type: 'boolean' },
+        'no-open': { type: 'boolean' },
+      })
+      await vm.vmDesktop(ctx, await repoArg(ctx, positionals[0], values.repo), {
+        vnc: Boolean(values.vnc),
+        isPublic: Boolean(values.public),
+        open: values['no-open'] ? false : undefined,
+      })
+      return 0
+    }
+    case 'browser': {
+      const { values, positionals } = parse(rest, repoOpt)
+      await vm.vmBrowser(ctx, await repoArg(ctx, positionals[0], values.repo))
+      return 0
+    }
+    case 'shot': {
+      const { values, positionals } = parse(rest, {
+        ...repoOpt,
+        window: { type: 'string', short: 'w' },
+        out: { type: 'string', short: 'o' },
+        'no-open': { type: 'boolean' },
+      })
+      await vm.vmShot(ctx, await repoArg(ctx, positionals[0], values.repo), {
+        window: values.window,
+        out: values.out,
+        open: values['no-open'] ? false : undefined,
+      })
       return 0
     }
     case 'serve': {

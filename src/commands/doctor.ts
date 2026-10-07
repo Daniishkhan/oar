@@ -4,6 +4,7 @@ import { loadSecrets, repoConfig, sshAlias } from '../config.js'
 import type { Ctx } from '../context.js'
 import { commandExists } from '../exec.js'
 import { macGhOk } from '../github.js'
+import { desktopProbeCommand, parseMcpList, parseProbe } from '../desktop.js'
 import { HerdrMachine, localHerdr } from '../herdr.js'
 import { loadState, UP_STATES } from '../state.js'
 
@@ -148,6 +149,43 @@ export async function doctor(
         Boolean(repoDir && repoDir.stdout.includes('ok')),
         'attach the repo to the boat environment',
       )
+      const probe = await runCommand(ctx.boat, vm.sandboxId, desktopProbeCommand, {
+        timeoutSeconds: 60,
+      }).catch(() => null)
+      const d = parseProbe(probe?.stdout ?? '')
+      push(`${name}: X display :0`, d.x11 === 'ok', d.x11 ?? 'probe failed')
+      push(`${name}: agent-chrome`, d.chrome === 'active', d.chrome ?? '')
+      push(`${name}: chrome CDP 9222`, Boolean(d.cdp && d.cdp !== 'none'), d.cdp ?? '')
+      push(
+        `${name}: chrome profile`,
+        d.profile === 'ok',
+        d.profile === 'ok' ? '/srv/oar/chrome' : 'no Default/ yet (opens on first start)',
+      )
+      push(
+        `${name}: userns sysctl`,
+        d.sysctl === '0',
+        `kernel.apparmor_restrict_unprivileged_userns=${d.sysctl ?? '?'}`,
+      )
+      push(
+        `${name}: playwright browsers`,
+        Boolean(d.pw),
+        d.pw || 'none under ~/.local/share/ms-playwright',
+      )
+      push(
+        `${name}: linger`,
+        (d.linger ?? '').includes('user'),
+        d.linger || 'not set; boat computer MCP needs it',
+      )
+      const mcp = await runCommand(ctx.boat, vm.sandboxId, 'claude mcp list 2>/dev/null', {
+        timeoutSeconds: 120,
+      }).catch(() => null)
+      const servers = parseMcpList(mcp?.stdout ?? '')
+      for (const s of ['browser', 'computer'])
+        push(
+          `${name}: mcp ${s}`,
+          servers[s] === 'connected',
+          servers[s] ?? `not registered; oar vm setup ${name}`,
+        )
       if (ts.enabled) {
         const peer = tsPeers[sshAlias(name)]
         push(

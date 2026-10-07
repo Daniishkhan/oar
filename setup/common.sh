@@ -42,7 +42,7 @@ fi
 # Claude Code: user-level config for the VM. The real login is `claude auth login`, done once
 # interactively (oar vm new does it; `oar vm ssh <repo> -- claude auth login` repeats it).
 if [ -d "$VM_FILES" ]; then
-  [ -f "$HOME/.claude/settings.json" ] || cp "$VM_FILES/claude-settings.json" "$HOME/.claude/settings.json"
+  cp "$VM_FILES/claude-settings.json" "$HOME/.claude/settings.json"   # oar-owned; the Herdr integration re-adds its hook below
   cp "$VM_FILES/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
 fi
 claude update || true
@@ -54,6 +54,9 @@ mkdir -p "$HOME/.codex" && chmod 700 "$HOME/.codex"
 
 # Lets Herdr resume Claude panes into their native sessions after a server restart.
 herdr integration install claude || true
+
+# Agent desktop & browser (agent Chrome on :0, MCP servers, Electron prerequisites, shot helpers).
+bash "$HERE/desktop.sh"
 
 # PATH for login shells (phone SSH, Herdr panes).
 grep -qs 'local/bin' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"

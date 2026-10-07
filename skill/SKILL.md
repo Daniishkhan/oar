@@ -69,6 +69,7 @@ blocked/done. If `HERDR_ENV=1`, offer to split a pane running `oar watch`.
 | it finished but there is no PR | `oar task done <id>`                                                    |
 | the VM was stopped             | `oar vm up <repo>` (resumes suspended tasks), or `oar task resume <id>` |
 | everything at once             | `oar status`                                                            |
+| see what it is doing on screen | `oar vm desktop <repo>` (live), `oar vm shot <repo>` (PNG)              |
 
 Never run `oar vm stop` while tasks are live unless the user asks; `--force-tasks` suspends them.
 Several independent tasks: one `task new` + `dispatch` each; every task gets its own worktree,

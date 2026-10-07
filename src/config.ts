@@ -14,6 +14,7 @@ export interface Paths {
   stateFile: string
   lockFile: string
   tasksDir: string
+  shotsDir: string
   sshDir: string
   sshConfig: string
   aliasFile: string
@@ -37,6 +38,7 @@ export function paths(home: string = homedir()): Paths {
     stateFile: join(stateDir, 'state.json'),
     lockFile: join(stateDir, 'state.lock'),
     tasksDir: join(stateDir, 'tasks'),
+    shotsDir: join(stateDir, 'shots'),
     sshDir,
     sshConfig: join(sshDir, 'config'),
     aliasFile: join(sshDir, 'oar_config'),

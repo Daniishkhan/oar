@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { ensureUp, vmKeep, vmStop } from '../src/commands/vm.js'
+import { ensureUp, vmDesktop, vmKeep, vmShot, vmStop } from '../src/commands/vm.js'
 import { loadState } from '../src/state.js'
 import { world } from './helpers.js'
 
@@ -106,5 +106,31 @@ describe('vm keep / stop', () => {
     await vmStop(w.ctx, 'engine', { forceTasks: true })
     expect(loadState(w.ctx.paths).tasks['t-1']?.status).toBe('suspended')
     expect((await w.boat.get('bx_1')).state).toBe('archived')
+  })
+})
+
+describe('vm desktop / shot', () => {
+  it('desktop prints a stream URL and refuses --public without --vnc', async () => {
+    const w = world({ state: { vms: { engine: { sandboxId: 'bx_1', label: 'engine' } } } })
+    w.boat.add('bx_1', { state: 'ready', desktopAvailable: true })
+    herdrOk(w)
+    await expect(vmDesktop(w.ctx, 'engine', { isPublic: true })).rejects.toMatchObject({
+      code: 'usage',
+    })
+    const url = await vmDesktop(w.ctx, 'engine', { vnc: true, open: false })
+    expect(url).toContain('bx_1-desktop')
+    expect(w.boat.desktops[0]?.opts).toMatchObject({ vnc: true })
+  })
+  it('shot runs the helper on the VM and saves the PNG locally', async () => {
+    const w = world({ state: { vms: { engine: { sandboxId: 'bx_1', label: 'engine' } } } })
+    w.boat.add('bx_1', { state: 'ready' })
+    herdrOk(w)
+    w.boat.commandRules.push({ re: /local\/bin\/shot/, result: { stdout: '/tmp/oar/shot.png\n' } })
+    w.boat.bytes.set('bx_1:/tmp/oar/shot.png', Buffer.from('PNGDATA'))
+    const out = await vmShot(w.ctx, 'engine', { window: 'Chrome', open: false })
+    expect(out).toMatch(/shots\/engine-\d{8}T\d{6}\.png$/)
+    const { readFileSync } = await import('node:fs')
+    expect(readFileSync(out, 'utf8')).toBe('PNGDATA')
+    expect(w.boat.commands.at(-1)?.req.command).toContain("'Chrome'")
   })
 })
