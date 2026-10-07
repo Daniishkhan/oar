@@ -20,7 +20,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "verify": "pnpm typecheck && pnpm format:check && pnpm lint && pnpm test",
-    "install:local": "pnpm build && mkdir -p ~/.local/bin ~/.claude/skills/oar && ln -sf \"$PWD/dist/oar.mjs\" ~/.local/bin/oar && chmod +x mac/oar-ts-hostkeys && ln -sf \"$PWD/mac/oar-ts-hostkeys\" ~/.local/bin/oar-ts-hostkeys && cp skill/SKILL.md ~/.claude/skills/oar/SKILL.md"
+    "install:local": "pnpm build && mkdir -p ~/.local/bin ~/.claude/skills/oar && ln -sf \"$PWD/dist/oar.mjs\" ~/.local/bin/oar && cp skill/SKILL.md ~/.claude/skills/oar/SKILL.md"
   },
   "dependencies": {
     "@boatdev/sdk": "^1.5.0",

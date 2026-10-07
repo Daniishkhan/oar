@@ -66,7 +66,7 @@ Mac (OAuth callbacks and `ALLOWED_HOSTS` keep working). `oar vm preview cno 8000
 token-protected public URL for the phone; `oar vm serve cno 8000` a tailnet-only one.
 
 **Watch the agent.** `oar vm desktop engine` streams the VM's desktop (add `--vnc` on a phone),
-where the agent's persistent, signed-in Chrome lives; `oar vm shot engine --window Chrome` pulls a
+where the agent's persistent, signed-in Chrome lives; `oar vm shot engine --window Chromium` pulls a
 screenshot to the Mac. Agents get `browser`, `browser-headless`, `chrome-devtools` and boat's
 `computer` MCP servers, plus `shot`/`pr-shot` helpers; `vm/CLAUDE.md` tells them which to use.
 

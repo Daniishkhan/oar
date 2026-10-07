@@ -65,11 +65,11 @@ rm -f "$TMP"
 # 9. MCP servers for Claude Code, registered with absolute paths (panes and boat commands lack nvm's bin).
 npm install -g "@playwright/mcp@$PW_MCP_VERSION" "chrome-devtools-mcp@$CDT_MCP_VERSION" >/dev/null 2>&1 || npm install -g "@playwright/mcp@$PW_MCP_VERSION" "chrome-devtools-mcp@$CDT_MCP_VERSION"
 GBIN="$(npm prefix -g)/bin"
-ln -sf "$GBIN/mcp-server-playwright" "$HOME/.local/bin/mcp-server-playwright"
+ln -sf "$GBIN/playwright-mcp" "$HOME/.local/bin/playwright-mcp"
 ln -sf "$GBIN/chrome-devtools-mcp" "$HOME/.local/bin/chrome-devtools-mcp"
 for s in browser browser-headless chrome-devtools; do claude mcp remove -s user "$s" >/dev/null 2>&1 || true; done
-claude mcp add -s user browser -- "$HOME/.local/bin/mcp-server-playwright" --cdp-endpoint http://127.0.0.1:9222 --output-dir /tmp/oar/pw
-claude mcp add -s user browser-headless -- "$HOME/.local/bin/mcp-server-playwright" --browser chrome --headless --isolated --output-dir /tmp/oar/pw-headless
+claude mcp add -s user browser -- "$HOME/.local/bin/playwright-mcp" --cdp-endpoint http://127.0.0.1:9222 --output-dir /tmp/oar/pw
+claude mcp add -s user browser-headless -- "$HOME/.local/bin/playwright-mcp" --browser chrome --headless --isolated --output-dir /tmp/oar/pw-headless
 claude mcp add -s user chrome-devtools -- "$HOME/.local/bin/chrome-devtools-mcp" --browserUrl=http://127.0.0.1:9222
 # boat's own `computer` MCP entry in ~/.claude.json is left alone.
 

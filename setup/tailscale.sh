@@ -44,14 +44,13 @@ else
     if [ "${OAR_TS_OPTIONAL:-0}" = 1 ]; then echo "tailscale: not joined and no auth key; skipping (set TS_AUTHKEY in ~/.config/oar/env)"; exit 0; fi
     echo "no auth key at $KEYFILE; run: oar vm setup <repo> with TS_AUTHKEY set" >&2; exit 1
   fi
+  # Plain OpenSSH over the tailnet is enough (oar pins boat's host key under the tailnet name), so
+  # Tailscale SSH and tags are opt-in: OAR_TS_SSH=1 / OAR_TS_TAGS=tag:oar need matching policy rules.
+  UP_FLAGS=(--hostname="$HOSTNAME_TS" --accept-dns=false --reset)
+  [ "${OAR_TS_SSH:-0}" = 1 ] && UP_FLAGS+=(--ssh)
+  [ -n "${OAR_TS_TAGS:-}" ] && UP_FLAGS+=(--advertise-tags="$OAR_TS_TAGS")
   set +x   # keep the key out of the trace
-  sudo tailscale up \
-    --auth-key="file:$KEYFILE" \
-    --hostname="$HOSTNAME_TS" \
-    --ssh \
-    --advertise-tags=tag:oar \
-    --accept-dns=false \
-    --reset
+  sudo tailscale up --auth-key="file:$KEYFILE" "${UP_FLAGS[@]}"
   set -x
   rm -f "$KEYFILE"
 fi

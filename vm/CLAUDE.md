@@ -28,7 +28,7 @@ a time; everything else goes headless.
 - `chrome-devtools` (MCP): console, network and performance on the agent Chrome.
 - `computer` (MCP, boat): screenshot + accessibility tree, click and type on any X window
   (Electron, dialogs). `nodes-desktop` (project MCP) attaches to the NODES app on :9350.
-- `shot /tmp/oar/x.png [window]` grabs the screen or one window; view it with Read.
+- `shot /tmp/oar/x.png [window-title-substring, e.g. Chromium]` grabs the screen or one window; view it with Read.
 - Screenshots belong in the PR body: `pr-shot <png> <label>` prints the markdown; fallback:
   `git add -f test-results/oar/<slug>/*.png` as a separate last commit and say so.
 

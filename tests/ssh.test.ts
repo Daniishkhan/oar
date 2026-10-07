@@ -110,12 +110,14 @@ describe('pin with a tailnet', () => {
       alias: 'oar-engine',
       endpoint: { host: '1.1.1.1', port: 22001 },
       hostKey: 'ssh-ed25519 ONE',
-      tailnet: { host: 'oar-engine.tail1d8b49.ts.net', hostkeysCmd: p.hostkeysCmd },
+      tailnet: { host: 'oar-engine.tail1d8b49.ts.net' },
     })
     const text = readFileSync(p.aliasFile, 'utf8')
     expect(text).toContain('Host oar-engine\n  HostName oar-engine.tail1d8b49.ts.net')
-    expect(text).toContain(`KnownHostsCommand ${p.hostkeysCmd} %H`)
+    expect(text).toContain(`UserKnownHostsFile ${p.knownHosts}`)
     expect(text).toContain('Host oar-engine-direct\n  HostName 1.1.1.1\n  Port 22001')
-    expect(readFileSync(p.knownHosts, 'utf8')).toBe('[1.1.1.1]:22001 ssh-ed25519 ONE\n')
+    expect(readFileSync(p.knownHosts, 'utf8')).toBe(
+      '[1.1.1.1]:22001 ssh-ed25519 ONE\noar-engine.tail1d8b49.ts.net ssh-ed25519 ONE\n',
+    )
   })
 })

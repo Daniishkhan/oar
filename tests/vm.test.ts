@@ -35,7 +35,7 @@ describe('ensureUp', () => {
     const r = await ensureUp(w.ctx, 'engine', (l) => log.push(l))
     expect(r.state).toBe('ready')
     expect(r.herdrReachable).toBe(true)
-    expect(readFileSync(w.ctx.paths.knownHosts, 'utf8')).toBe(
+    expect(readFileSync(w.ctx.paths.knownHosts, 'utf8')).toContain(
       '[203.0.113.11]:22001 ssh-ed25519 AAAAFAKE1\n',
     )
     expect(readFileSync(w.ctx.paths.aliasFile, 'utf8')).toContain('HostName 203.0.113.11')

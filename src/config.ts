@@ -21,8 +21,6 @@ export interface Paths {
   knownHosts: string
   keyFile: string
   pubFile: string
-  /** KnownHostsCommand for tailnet aliases (installed by `pnpm install:local`). */
-  hostkeysCmd: string
 }
 
 export function paths(home: string = homedir()): Paths {
@@ -45,7 +43,6 @@ export function paths(home: string = homedir()): Paths {
     knownHosts: join(sshDir, 'oar_known_hosts'),
     keyFile: join(sshDir, 'oar_ed25519'),
     pubFile: join(sshDir, 'oar_ed25519.pub'),
-    hostkeysCmd: join(home, '.local', 'bin', 'oar-ts-hostkeys'),
   }
 }
 

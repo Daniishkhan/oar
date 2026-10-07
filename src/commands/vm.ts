@@ -49,11 +49,15 @@ async function refreshSsh(ctx: Ctx, repo: string, vm: VmRecord, log: Log): Promi
     endpoint,
     hostKey: res.hostKey,
     previous: vm.lastEndpoint,
-    tailnet: tsHost ? { host: tsHost, hostkeysCmd: ctx.paths.hostkeysCmd } : undefined,
+    tailnet: tsHost ? { host: tsHost } : undefined,
   })
   const direct = ssh.directAlias(alias)
   const reached = await ssh.probeAny(ctx.exec, tsHost ? [alias, direct] : [alias])
   const transport = tsHost && reached === alias ? 'tailnet' : 'direct'
+  if (tsHost && transport === 'direct') {
+    // Not on the tailnet yet: keep `oar-<repo>` usable (Herdr's machine profile targets it).
+    ssh.pin(ctx.paths, { alias, endpoint, hostKey: res.hostKey, previous: vm.lastEndpoint })
+  }
   log(
     transport === 'tailnet'
       ? `ssh ${alias} → ${tsHost} (tailnet; ${direct} → ${endpoint.host}:${endpoint.port} pinned as fallback)`

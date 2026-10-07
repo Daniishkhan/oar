@@ -26,8 +26,8 @@ describe('desktop helpers', () => {
       'Checking MCP server health...',
       '',
       'browser: /home/user/.local/bin/mcp-server-playwright --cdp-endpoint http://127.0.0.1:9222 - ✓ Connected',
-      'computer: cua-driver mcp - ✓ Connected',
-      'paper: http://127.0.0.1:29979/mcp (HTTP) - ✗ Failed to connect',
+      'computer: cua-driver mcp - ✔ Connected',
+      'paper: http://127.0.0.1:29979/mcp (HTTP) - ✘ Failed to connect — ECONNREFUSED',
     ].join('\n')
     expect(parseMcpList(text)).toEqual({
       browser: 'connected',

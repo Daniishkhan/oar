@@ -34,8 +34,8 @@ export function parseProbe(stdout: string): Record<string, string> {
 export function parseMcpList(stdout: string): Record<string, 'connected' | 'failed'> {
   const out: Record<string, 'connected' | 'failed'> = {}
   for (const line of stdout.split('\n')) {
-    const m = line.match(/^([A-Za-z0-9_.-]+):\s.*?-\s*(✓|✗)/)
-    if (m) out[m[1]!] = m[2] === '✓' ? 'connected' : 'failed'
+    const m = line.match(/^([A-Za-z0-9_.-]+):\s.*?-\s*(✓|✔|✗|✘)/)
+    if (m) out[m[1]!] = m[2] === '✓' || m[2] === '✔' ? 'connected' : 'failed'
   }
   return out
 }

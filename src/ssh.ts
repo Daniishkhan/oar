@@ -101,21 +101,20 @@ export interface PinArgs {
   hostKey: string
   previous?: Endpoint
   /** When set, `<alias>` points at the tailnet name and `<alias>-direct` at boat's endpoint. */
-  tailnet?: { host: string; hostkeysCmd: string }
+  tailnet?: { host: string }
 }
 
 export const directAlias = (alias: string) => `${alias}-direct`
 
-/** Tailscale publishes each node's current SSH host key; the KnownHostsCommand reads it, so no file is ever stale. */
-export function tailnetBlock(alias: string, host: string, hostkeysCmd: string, p: Paths): string {
+/** Same pinned host key as the direct alias (boat tells us the key on every resume), reached over the tailnet. */
+export function tailnetBlock(alias: string, host: string, p: Paths): string {
   return [
     `Host ${alias}`,
     `  HostName ${host}`,
     '  User user',
     `  IdentityFile ${p.keyFile}`,
     '  IdentitiesOnly yes',
-    '  UserKnownHostsFile /dev/null',
-    `  KnownHostsCommand ${hostkeysCmd} %H`,
+    `  UserKnownHostsFile ${p.knownHosts}`,
     '  StrictHostKeyChecking yes',
     '  ServerAliveInterval 15',
     '  ServerAliveCountMax 4',
@@ -127,20 +126,21 @@ export function tailnetBlock(alias: string, host: string, hostkeysCmd: string, p
 export function pin(p: Paths, a: PinArgs): void {
   mkdirSync(p.sshDir, { recursive: true, mode: 0o700 })
   const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '')
-  const stale = [knownHostsName(a.endpoint), ...(a.previous ? [knownHostsName(a.previous)] : [])]
+  const stale = [
+    knownHostsName(a.endpoint),
+    ...(a.previous ? [knownHostsName(a.previous)] : []),
+    ...(a.tailnet ? [a.tailnet.host] : []),
+  ]
   const kh = knownHostsWithout(read(p.knownHosts), stale)
-  writeFileSync(
-    p.knownHosts,
-    `${[kh, ...knownHostsLines(a.endpoint, a.hostKey)].filter(Boolean).join('\n')}\n`,
-  )
+  const lines = [
+    ...knownHostsLines(a.endpoint, a.hostKey),
+    ...(a.tailnet ? knownHostsLines({ host: a.tailnet.host, port: 22 }, a.hostKey) : []),
+  ]
+  writeFileSync(p.knownHosts, `${[kh, ...lines].filter(Boolean).join('\n')}\n`)
   chmodSync(p.knownHosts, 0o600)
   let aliases = read(p.aliasFile)
   if (a.tailnet) {
-    aliases = replaceHostBlock(
-      aliases,
-      a.alias,
-      tailnetBlock(a.alias, a.tailnet.host, a.tailnet.hostkeysCmd, p),
-    )
+    aliases = replaceHostBlock(aliases, a.alias, tailnetBlock(a.alias, a.tailnet.host, p))
     aliases = replaceHostBlock(
       aliases,
       directAlias(a.alias),
@@ -148,7 +148,11 @@ export function pin(p: Paths, a: PinArgs): void {
     )
   } else {
     aliases = replaceHostBlock(aliases, a.alias, aliasBlock(a.alias, a.endpoint, p))
-    aliases = replaceHostBlock(aliases, directAlias(a.alias), '').replace(/\n+$/, '\n')
+    aliases = replaceHostBlock(
+      aliases,
+      directAlias(a.alias),
+      aliasBlock(directAlias(a.alias), a.endpoint, p),
+    )
   }
   writeFileSync(p.aliasFile, aliases)
   chmodSync(p.aliasFile, 0o600)
