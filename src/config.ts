@@ -88,7 +88,7 @@ export const ConfigSchema = z.object({
   /** Applied with `git config --global` on every VM by `oar vm setup`, so PRs are credited to you. */
   gitIdentity: z
     .object({ name: z.string().min(1), email: z.string().email() })
-    .default({ name: 'Daniishkhan', email: '5006591+Daniishkhan@users.noreply.github.com' }),
+    .default({ name: 'daniishkhan', email: 'danishafzalkhan@gmail.com' }),
   repos: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,15}$/), RepoSchema),
 })
 export type Config = z.infer<typeof ConfigSchema>
