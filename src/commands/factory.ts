@@ -35,7 +35,12 @@ async function forward(ctx: Ctx, args: string[]): Promise<number> {
 
 async function remote(ctx: Ctx, command: string, timeoutMs = 120_000): Promise<string> {
   const alias = controllerAlias(ctx)
-  const r = await ssh.remote(ctx.exec, alias, command, timeoutMs)
+  const r = await ssh.remote(
+    ctx.exec,
+    alias,
+    `export PATH=$HOME/.local/bin:$PATH; ${command}`,
+    timeoutMs,
+  )
   if (r.code !== 0)
     throw new OarError('ssh', `on the controller: ${command}\n${(r.stderr || r.stdout).trim()}`)
   return r.stdout

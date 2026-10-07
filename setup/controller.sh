@@ -9,6 +9,11 @@ cd "$HOME"
 mkdir -p "$HOME/.local/bin" "$HOME/.config/oar" "$HOME/.local/state/oar/tasks" "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
 
+# The worker layout (/home/user/oar/setup, /home/user/oar/vm) also applies here, so the shared
+# scripts (tailscale.sh) find their files.
+ln -sfn "$APP/setup" "$HOME/oar/setup"
+ln -sfn "$APP/vm" "$HOME/oar/vm"
+
 # oar itself: the single-file bundle, resolved through a symlink so its assets sit beside it.
 chmod +x "$APP/dist/oar.mjs"
 ln -sf "$APP/dist/oar.mjs" "$HOME/.local/bin/oar"

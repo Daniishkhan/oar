@@ -11,6 +11,9 @@ Environment=TERM=xterm-256color
 Environment=DISPLAY=:0
 Environment=PLAYWRIGHT_BROWSERS_PATH=/home/user/.local/share/ms-playwright
 WorkingDirectory=/home/user
+# systemd owns the server: a stray `herdr server` (started by hand or by a remote attach) holds the
+# socket and makes this unit flap with "already running", so it is removed first.
+ExecStartPre=-/usr/bin/pkill -u user -x herdr
 ExecStart=/home/user/.local/bin/herdr server
 Restart=on-failure
 RestartSec=3

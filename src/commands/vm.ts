@@ -103,12 +103,8 @@ async function ensureHerdrServer(
   if (active?.stdout.trim() === 'active') {
     log('herdr-server is active on the VM but this client cannot reach it (stale machine profile?)')
   } else {
-    log('herdr server on the VM not running; starting it')
-    await ssh.remote(
-      ctx.exec,
-      via,
-      'sudo systemctl restart herdr-server 2>/dev/null || (nohup ~/.local/bin/herdr server >/dev/null 2>&1 &)',
-    )
+    log(`herdr server on the VM is ${active?.stdout.trim() || 'not running'}; restarting the unit`)
+    await ssh.remote(ctx.exec, via, 'sudo systemctl restart herdr-server')
     for (let i = 0; i < 6; i++) {
       await new Promise((r) => setTimeout(r, 3_000))
       if (await machine.reachable()) return true
