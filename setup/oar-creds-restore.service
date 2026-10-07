@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore the VM's own Claude/Codex logins from /srv/oar/creds (boat scrubs them on resume)
+Before=herdr-server.service agent-chrome.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=user
+Environment=HOME=/home/user
+ExecStart=/home/user/.local/bin/oar-creds restore
+
+[Install]
+WantedBy=multi-user.target

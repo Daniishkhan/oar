@@ -142,6 +142,16 @@ export async function ensureUp(
     )
   }
   vm = await refreshSsh(ctx, repo, vm, log)
+  // boat scrubs ~/.claude/.credentials.json and ~/.codex/auth.json on resume; put our copies back.
+  const creds = await ssh
+    .remote(
+      ctx.exec,
+      reachableAlias(vm, repo),
+      '~/.local/bin/oar-creds restore 2>/dev/null',
+      30_000,
+    )
+    .catch(() => null)
+  if (creds?.stdout.trim()) log(`logins: ${creds.stdout.trim().split('\n').join(', ')}`)
   const herdrReachable = await ensureHerdrServer(ctx, repo, cfg, log, opts.interactive ?? false)
   await mutateState(ctx.paths, (s) => {
     const rec = requireVm(s, repo)
@@ -220,6 +230,8 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
     ['setup/oar-linger.service', readAsset('setup', 'oar-linger.service')],
     ['vm/shot', readAsset('vm', 'shot')],
     ['vm/pr-shot', readAsset('vm', 'pr-shot')],
+    ['vm/oar-creds', readAsset('vm', 'oar-creds')],
+    ['setup/oar-creds-restore.service', readAsset('setup', 'oar-creds-restore.service')],
   ]
   for (const [rel, content] of files) await ctx.boat.writeFile(id, `/home/user/oar/${rel}`, content)
   log(
@@ -284,6 +296,22 @@ async function setupTailscale(
   })
   const vm = requireVm(loadState(ctx.paths), repo)
   await refreshSsh(ctx, repo, vm, log)
+}
+
+/** Interactive `claude auth login` (and `codex login` with --codex) on the VM, then save the login so a resume keeps it. */
+export async function vmLogin(
+  ctx: Ctx,
+  repo: string,
+  opts: { codex?: boolean } = {},
+): Promise<void> {
+  const up = await ensureUp(ctx, repo, ctx.io.out)
+  const via = reachableAlias(up.vm, repo)
+  const cmd = opts.codex ? 'codex login' : 'claude auth login'
+  ctx.io.out(`${cmd} on ${repo} (browser flow; paste the code back here)`)
+  const code = await ssh.interactive(ctx.exec, via, `export PATH=$HOME/.local/bin:$PATH; ${cmd}`)
+  if (code !== 0) throw new OarError('ssh', `${cmd} exited ${code}`)
+  const saved = await ssh.remote(ctx.exec, via, '~/.local/bin/oar-creds save', 30_000)
+  ctx.io.out(saved.stdout.trim() || 'nothing to save')
 }
 
 /** A desktop-stream URL for the VM: Moonlight by default (clipboard, 60 fps), noVNC with `vnc` (phones, bad networks). */

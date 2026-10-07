@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# oar-creds save|restore|status
+# boat removes agent credential files (~/.claude/.credentials.json, ~/.codex/auth.json) when a
+# sandbox resumes with agent-credential passing off. The logins done on this VM are ours, so keep
+# a copy under /srv/oar (snapshotted, outside boat's scrub list) and put it back at boot and on
+# every `oar vm up`.
+set -euo pipefail
+STORE=/srv/oar/creds
+declare -A FILES=(
+  [claude]="$HOME/.claude/.credentials.json"
+  [codex]="$HOME/.codex/auth.json"
+)
+cmd="${1:-status}"
+case "$cmd" in
+  save)
+    sudo mkdir -p "$STORE" && sudo chown user:user "$STORE" && chmod 700 "$STORE"
+    for name in "${!FILES[@]}"; do
+      f="${FILES[$name]}"
+      if [ -s "$f" ]; then install -m 600 "$f" "$STORE/$name.json" && echo "saved $name"; fi
+    done ;;
+  restore)
+    for name in "${!FILES[@]}"; do
+      f="${FILES[$name]}"; s="$STORE/$name.json"
+      if [ -s "$s" ] && [ ! -s "$f" ]; then
+        mkdir -p "$(dirname "$f")" && install -m 600 "$s" "$f" && echo "restored $name"
+      fi
+    done ;;
+  status)
+    for name in "${!FILES[@]}"; do
+      f="${FILES[$name]}"; s="$STORE/$name.json"
+      printf '%s: live=%s saved=%s\n' "$name" "$([ -s "$f" ] && echo yes || echo no)" "$([ -s "$s" ] && echo yes || echo no)"
+    done ;;
+  *) echo "usage: oar-creds save|restore|status" >&2; exit 2 ;;
+esac

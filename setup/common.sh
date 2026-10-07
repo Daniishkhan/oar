@@ -52,6 +52,13 @@ claude update || true
 mkdir -p "$HOME/.codex" && chmod 700 "$HOME/.codex"
 [ -f "$VM_FILES/codex-config.toml" ] && cp "$VM_FILES/codex-config.toml" "$HOME/.codex/config.toml"
 
+# Our own agent logins survive boat's resume-time scrub: copy under /srv/oar/creds, restore at boot.
+install -m 755 "$VM_FILES/oar-creds" "$HOME/.local/bin/oar-creds"
+sudo install -m 644 "$HERE/oar-creds-restore.service" /etc/systemd/system/oar-creds-restore.service
+sudo systemctl daemon-reload && sudo systemctl enable oar-creds-restore >/dev/null
+oar-creds restore || true
+oar-creds save || true
+
 # Lets Herdr resume Claude panes into their native sessions after a server restart.
 herdr integration install claude || true
 
