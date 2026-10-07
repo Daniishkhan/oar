@@ -22,7 +22,9 @@ fi
 # npm's global prefix on the boat image is nvm's, which login shells see but `ssh host cmd`,
 # boat's command API and systemd do not. Install globals there, then expose them in ~/.local/bin.
 # pnpm 12.3.4 is what nodes-engine pins (corepack cannot write /usr/bin here).
-npm install -g pnpm@12.3.4 @nanonets/graft@latest
+# graft is pinned to the Mac's version: the repos commit graft's hook files, and a newer graft
+# rewrites them on SessionStart, which dirties the worktree and fails the gate.
+npm install -g pnpm@12.3.4 @nanonets/graft@0.19.0
 # npm 11 refuses graft's native-build install scripts; the grammars ship prebuilds, so a rebuild is enough.
 npm rebuild -g @nanonets/graft >/dev/null 2>&1 || true
 GBIN="$(npm prefix -g)/bin"

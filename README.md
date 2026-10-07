@@ -83,6 +83,9 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] `herdr-server.service` is enabled and active after setup with the socket at `~/.config/herdr/herdr.sock` (2026-10-07)
 - [ ] `herdr-server.service` restores the session after a resume and `herdr --remote` attaches to it
 - [ ] `herdr --machine` works again after the endpoint changes, without `machine reconnect`
-- [ ] `worktree create` result fields mirror `workspace create`
-- [ ] the `~/.claude.json` pre-trust suppresses the trust dialog on the VM
-- [ ] `gh pr create` on the VM works with the injected token
+- [x] `worktree create` result fields mirror `workspace create` (`workspace.workspace_id`, `tab.tab_id`, `root_pane.pane_id`) (2026-10-07)
+- [x] the `~/.claude.json` pre-trust suppresses the trust dialog on the VM; what did appear was the
+      fullscreen-renderer prompt, now pre-set via `tui` in `vm/claude-settings.json` and answered by the runner (2026-10-07)
+- [x] `gh pr create` on the VM works with the injected token: nodes-engine draft PR #149 from the smoke task (2026-10-07)
+- [x] `herdr machine add <alias> --label <l> --remote-session default` works non-interactively once the server runs on the VM (2026-10-07)
+- [ ] Codex is not logged in on the VMs, so nodes-engine's pre-PR Codex review reports "did not run"; `codex login` over `oar vm ssh` if wanted
