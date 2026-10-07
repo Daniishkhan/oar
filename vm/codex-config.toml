@@ -1,0 +1,19 @@
+# Codex CLI config for an oar VM. The login (auth.json) is copied from the Mac by hand:
+#   scp ~/.codex/auth.json oar-<repo>:~/.codex/auth.json
+# Everything Mac-specific (app MCP servers, notifiers, plugins) is left out on purpose.
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+service_tier = "default"
+
+[mcp_servers.graft]
+command = "graft"
+args = ["mcp"]
+
+[projects."/home/user/nodes-engine"]
+trust_level = "trusted"
+
+[projects."/home/user/nodes-cno"]
+trust_level = "trusted"
+
+[projects."/home/user/worktrees"]
+trust_level = "trusted"

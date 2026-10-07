@@ -182,6 +182,7 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
     ['setup/herdr-server.service', readAsset('setup', 'herdr-server.service')],
     ['vm/claude-settings.json', readAsset('vm', 'claude-settings.json')],
     ['vm/CLAUDE.md', readAsset('vm', 'CLAUDE.md')],
+    ['vm/codex-config.toml', readAsset('vm', 'codex-config.toml')],
   ]
   for (const [rel, content] of files) await ctx.boat.writeFile(id, `/home/user/oar/${rel}`, content)
   log(

@@ -102,6 +102,17 @@ export async function doctor(
         ok,
         ok ? 'claude.ai' : `oar vm ssh ${name} -- claude auth login`,
       )
+      const codex = await runCommand(ctx.boat, vm.sandboxId, 'codex login status 2>&1 | head -1', {
+        timeoutSeconds: 60,
+      }).catch(() => null)
+      const codexOk = Boolean(codex && /logged in/i.test(codex.stdout))
+      push(
+        `${name}: codex login on VM`,
+        codexOk,
+        codexOk
+          ? codex!.stdout.trim()
+          : `scp ~/.codex/auth.json ${sshAlias(name)}:~/.codex/auth.json`,
+      )
       const repoDir = await runCommand(
         ctx.boat,
         vm.sandboxId,

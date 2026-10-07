@@ -47,6 +47,11 @@ if [ -d "$VM_FILES" ]; then
 fi
 claude update || true
 
+# Codex CLI: minimal VM config. The login itself is copied from the Mac once:
+#   scp ~/.codex/auth.json oar-<repo>:~/.codex/auth.json
+mkdir -p "$HOME/.codex" && chmod 700 "$HOME/.codex"
+[ -f "$VM_FILES/codex-config.toml" ] && cp "$VM_FILES/codex-config.toml" "$HOME/.codex/config.toml"
+
 # Lets Herdr resume Claude panes into their native sessions after a server restart.
 herdr integration install claude || true
 
