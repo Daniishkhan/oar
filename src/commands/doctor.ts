@@ -46,6 +46,30 @@ export async function doctor(
     'gh auth refresh -h github.com -s repo,workflow (VM gh is used as fallback)',
   )
   push('osascript', await commandExists(ctx.exec, 'osascript'), 'notifications')
+  const ts = ctx.config.tailscale
+  let tsPeers: Record<string, { online: boolean; ip?: string }> = {}
+  if (ts.enabled) {
+    const st = await ctx.exec.run(ts.cli, ['status', '--json'], { timeoutMs: 20_000 })
+    try {
+      const j = JSON.parse(st.stdout) as {
+        MagicDNSSuffix?: string
+        Self?: { Online?: boolean; HostName?: string }
+        Peer?: Record<string, { HostName?: string; Online?: boolean; TailscaleIPs?: string[] }>
+      }
+      for (const p of Object.values(j.Peer ?? {}))
+        if (p.HostName) tsPeers[p.HostName] = { online: Boolean(p.Online), ip: p.TailscaleIPs?.[0] }
+      const suffixOk = !ts.suffix || j.MagicDNSSuffix === ts.suffix
+      push(
+        'tailscale on Mac',
+        st.code === 0 && Boolean(j.Self?.Online) && suffixOk,
+        suffixOk
+          ? `${j.Self?.HostName ?? '?'} on ${j.MagicDNSSuffix ?? '?'}`
+          : `tailnet is ${j.MagicDNSSuffix}, config says ${ts.suffix}`,
+      )
+    } catch {
+      push('tailscale on Mac', false, `${ts.cli} status failed; open the Tailscale app and sign in`)
+    }
+  }
 
   // boat side
   let envs: Array<{ name: string }> = []
@@ -124,6 +148,38 @@ export async function doctor(
         Boolean(repoDir && repoDir.stdout.includes('ok')),
         'attach the repo to the boat environment',
       )
+      if (ts.enabled) {
+        const peer = tsPeers[sshAlias(name)]
+        push(
+          `${name}: tailnet node ${sshAlias(name)}`,
+          Boolean(peer?.online),
+          peer
+            ? `${peer.online ? 'online' : 'offline'} ${peer.ip ?? ''}`
+            : `not in the tailnet yet: oar vm setup ${name} with TS_AUTHKEY set`,
+        )
+        if (peer?.online) {
+          const ping = await ctx.exec.run(
+            ts.cli,
+            ['ping', '-c', '1', '--timeout', '5s', sshAlias(name)],
+            { timeoutMs: 15_000 },
+          )
+          push(
+            `${name}: tailscale ping`,
+            ping.code === 0,
+            ping.stdout.trim().split('\n').pop() ?? ping.stderr.trim(),
+          )
+          const sshOk = await ctx.exec.run(
+            'ssh',
+            ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', sshAlias(name), 'true'],
+            { timeoutMs: 20_000 },
+          )
+          push(
+            `${name}: ssh ${sshAlias(name)} (tailnet)`,
+            sshOk.code === 0,
+            sshOk.code === 0 ? 'ok' : (sshOk.stderr.trim().split('\n').pop() ?? ''),
+          )
+        }
+      }
     }
   }
 

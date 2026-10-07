@@ -1,6 +1,6 @@
 import { readAsset } from '../assets.js'
 import { ensureDeadline, runCommand, sandboxState, waitForState, waitUp } from '../boat.js'
-import { repoConfig, sshAlias, type RepoConfig } from '../config.js'
+import { loadSecrets, repoConfig, sshAlias, tailnetHost, type RepoConfig } from '../config.js'
 import type { Ctx } from '../context.js'
 import { shq } from '../exec.js'
 import { OarError } from '../errors.js'
@@ -31,20 +31,35 @@ async function refreshSsh(ctx: Ctx, repo: string, vm: VmRecord, log: Log): Promi
   const res = await ctx.boat.sshKey(vm.sandboxId, pub)
   const endpoint = ssh.endpointFrom(res)
   if (!res.hostKey) throw new OarError('ssh', 'boat returned no host key to pin')
+  const tsHost = tailnetHost(ctx.config, repo)
+  const alias = sshAlias(repo)
   ssh.pin(ctx.paths, {
-    alias: sshAlias(repo),
+    alias,
     endpoint,
     hostKey: res.hostKey,
     previous: vm.lastEndpoint,
+    tailnet: tsHost ? { host: tsHost, hostkeysCmd: ctx.paths.hostkeysCmd } : undefined,
   })
-  log(`ssh alias ${sshAlias(repo)} → ${endpoint.host}:${endpoint.port} (host key pinned)`)
-  await ssh.probe(ctx.exec, sshAlias(repo))
+  const direct = ssh.directAlias(alias)
+  const reached = await ssh.probeAny(ctx.exec, tsHost ? [alias, direct] : [alias])
+  const transport = tsHost && reached === alias ? 'tailnet' : 'direct'
+  log(
+    transport === 'tailnet'
+      ? `ssh ${alias} → ${tsHost} (tailnet; ${direct} → ${endpoint.host}:${endpoint.port} pinned as fallback)`
+      : `ssh ${reached} → ${endpoint.host}:${endpoint.port} (host key pinned)${tsHost ? `; tailnet name ${tsHost} not reachable yet` : ''}`,
+  )
   return mutateState(ctx.paths, (s) => {
     const rec = requireVm(s, repo)
     rec.lastEndpoint = endpoint
     rec.lastHostKey = res.hostKey
+    rec.transport = transport
     return rec
   })
+}
+
+/** The alias that answered on the last `vm up`; commands that must work even when the tailnet is down use it. */
+export function reachableAlias(vm: VmRecord, repo: string): string {
+  return vm.transport === 'direct' ? ssh.directAlias(sshAlias(repo)) : sshAlias(repo)
 }
 
 async function ensureHerdrServer(
@@ -184,19 +199,18 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
     ['vm/claude-settings.json', readAsset('vm', 'claude-settings.json')],
     ['vm/CLAUDE.md', readAsset('vm', 'CLAUDE.md')],
     ['vm/codex-config.toml', readAsset('vm', 'codex-config.toml')],
+    ['setup/tailscale.sh', readAsset('setup', 'tailscale.sh')],
   ]
   for (const [rel, content] of files) await ctx.boat.writeFile(id, `/home/user/oar/${rel}`, content)
   log(
     `copied ${files.length} files to /home/user/oar; running setup/${cfg.setupScript} (several minutes)`,
   )
-  const code = await ssh.interactive(
-    ctx.exec,
-    sshAlias(repo),
-    `bash /home/user/oar/setup/${cfg.setupScript}`,
-  )
+  const via = reachableAlias(up.vm, repo)
+  const code = await ssh.interactive(ctx.exec, via, `bash /home/user/oar/setup/${cfg.setupScript}`)
   if (code !== 0)
     throw new OarError('ssh', `setup script exited ${code}`, `re-run with: oar vm setup ${repo}`)
   log('setup finished')
+  await setupTailscale(ctx, repo, id, via, log)
   const { name, email } = ctx.config.gitIdentity
   await runCommand(
     ctx.boat,
@@ -205,6 +219,75 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
     { timeoutSeconds: 30 },
   )
   log(`git identity on the VM: ${name} <${email}>`)
+}
+
+/** Joins the VM to the tailnet (first time needs TS_AUTHKEY), then re-pins so `oar-<repo>` uses the tailnet name. */
+async function setupTailscale(
+  ctx: Ctx,
+  repo: string,
+  id: string,
+  via: string,
+  log: Log,
+): Promise<void> {
+  const tsHost = tailnetHost(ctx.config, repo)
+  if (!tsHost) return
+  const key = loadSecrets(ctx.paths).TS_AUTHKEY
+  if (key) {
+    await ctx.boat.writeFile(id, '/home/user/oar/ts-authkey', `${key}\n`)
+    await runCommand(ctx.boat, id, 'chmod 600 /home/user/oar/ts-authkey', { timeoutSeconds: 30 })
+  }
+  log(
+    `tailscale: joining as ${tsHost}${key ? '' : ' (no TS_AUTHKEY; only works if already joined)'}`,
+  )
+  const code = await ssh.interactive(
+    ctx.exec,
+    via,
+    `OAR_TS_HOSTNAME=${sshAlias(repo)} bash /home/user/oar/setup/tailscale.sh`,
+  )
+  if (code !== 0)
+    throw new OarError(
+      'ssh',
+      `tailscale setup exited ${code}`,
+      'see the output above; TS_AUTHKEY in ~/.config/oar/env must be a reusable tagged key',
+    )
+  const ip = await runCommand(ctx.boat, id, 'tailscale ip -4', { timeoutSeconds: 30 }).catch(
+    () => null,
+  )
+  await mutateState(ctx.paths, (s) => {
+    requireVm(s, repo).tailscaleIp = ip?.stdout.trim() || undefined
+  })
+  const vm = requireVm(loadState(ctx.paths), repo)
+  await refreshSsh(ctx, repo, vm, log)
+}
+
+/** Private preview over the tailnet: https://oar-<repo>.<suffix> → 127.0.0.1:<port> on the VM. */
+export async function vmServe(
+  ctx: Ctx,
+  repo: string,
+  port: number,
+  opts: { off?: boolean } = {},
+): Promise<void> {
+  const tsHost = tailnetHost(ctx.config, repo)
+  if (!tsHost)
+    throw new OarError(
+      'config',
+      'tailscale is not configured',
+      'set tailscale.enabled and tailscale.suffix in ~/.config/oar/config.json',
+    )
+  const up = await ensureUp(ctx, repo, ctx.io.out)
+  const cmd = opts.off ? 'sudo tailscale serve reset' : `sudo tailscale serve --bg ${port}`
+  const r = await runCommand(ctx.boat, up.vm.sandboxId, cmd, { timeoutSeconds: 60 })
+  if (r.exitCode !== 0)
+    throw new OarError(
+      'boat',
+      `tailscale serve failed: ${(r.stderr || r.stdout).trim()}`,
+      'HTTPS certificates must be enabled in the Tailscale admin console (DNS tab)',
+    )
+  ctx.io.out(
+    opts.off
+      ? `serve reset on ${repo}`
+      : `https://${tsHost}  →  127.0.0.1:${port} on ${repo} (tailnet only; the service may bind localhost)`,
+  )
 }
 
 export async function vmNew(

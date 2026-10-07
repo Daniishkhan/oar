@@ -100,6 +100,27 @@ export interface PinArgs {
   endpoint: Endpoint
   hostKey: string
   previous?: Endpoint
+  /** When set, `<alias>` points at the tailnet name and `<alias>-direct` at boat's endpoint. */
+  tailnet?: { host: string; hostkeysCmd: string }
+}
+
+export const directAlias = (alias: string) => `${alias}-direct`
+
+/** Tailscale publishes each node's current SSH host key; the KnownHostsCommand reads it, so no file is ever stale. */
+export function tailnetBlock(alias: string, host: string, hostkeysCmd: string, p: Paths): string {
+  return [
+    `Host ${alias}`,
+    `  HostName ${host}`,
+    '  User user',
+    `  IdentityFile ${p.keyFile}`,
+    '  IdentitiesOnly yes',
+    '  UserKnownHostsFile /dev/null',
+    `  KnownHostsCommand ${hostkeysCmd} %H`,
+    '  StrictHostKeyChecking yes',
+    '  ServerAliveInterval 15',
+    '  ServerAliveCountMax 4',
+    '',
+  ].join('\n')
 }
 
 /** Record the sandbox's current machine: pinned host key, alias block, Include line. */
@@ -113,10 +134,23 @@ export function pin(p: Paths, a: PinArgs): void {
     `${[kh, ...knownHostsLines(a.endpoint, a.hostKey)].filter(Boolean).join('\n')}\n`,
   )
   chmodSync(p.knownHosts, 0o600)
-  writeFileSync(
-    p.aliasFile,
-    replaceHostBlock(read(p.aliasFile), a.alias, aliasBlock(a.alias, a.endpoint, p)),
-  )
+  let aliases = read(p.aliasFile)
+  if (a.tailnet) {
+    aliases = replaceHostBlock(
+      aliases,
+      a.alias,
+      tailnetBlock(a.alias, a.tailnet.host, a.tailnet.hostkeysCmd, p),
+    )
+    aliases = replaceHostBlock(
+      aliases,
+      directAlias(a.alias),
+      aliasBlock(directAlias(a.alias), a.endpoint, p),
+    )
+  } else {
+    aliases = replaceHostBlock(aliases, a.alias, aliasBlock(a.alias, a.endpoint, p))
+    aliases = replaceHostBlock(aliases, directAlias(a.alias), '').replace(/\n+$/, '\n')
+  }
+  writeFileSync(p.aliasFile, aliases)
   chmodSync(p.aliasFile, 0o600)
   const include = `Include ${p.aliasFile.replace(p.home, '~')}`
   const cfg = ensureInclude(read(p.sshConfig), include)
@@ -136,6 +170,21 @@ export async function probe(exec: Exec, alias: string, attempts = 6): Promise<vo
     await sleep(5_000)
   }
   throw new OarError('ssh', `cannot reach ${alias}: ${last}`, `try: ssh -v ${alias} true`)
+}
+
+/** First alias that answers, with few attempts for the preferred one (a tailnet name may not exist yet). */
+export async function probeAny(exec: Exec, aliases: string[]): Promise<string> {
+  let last = ''
+  for (const [i, alias] of aliases.entries()) {
+    const attempts = i === aliases.length - 1 ? 6 : 2
+    try {
+      await probe(exec, alias, attempts)
+      return alias
+    } catch (e) {
+      last = (e as Error).message
+    }
+  }
+  throw new OarError('ssh', last, `try: ssh -v ${aliases[0]} true`)
 }
 
 export const remote = (exec: Exec, alias: string, command: string, timeoutMs = 120_000) =>

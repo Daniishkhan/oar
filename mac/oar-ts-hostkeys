@@ -1,0 +1,21 @@
+#!/bin/sh
+# KnownHostsCommand for oar's tailnet aliases: prints known_hosts lines for one peer from the
+# SSH host keys Tailscale publishes (`tailscale status --json` → .Peer[].sshHostKeys).
+# Usage (from ~/.ssh/config):  KnownHostsCommand ~/.local/bin/oar-ts-hostkeys %H
+host="$1"
+TS="${OAR_TAILSCALE_CLI:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"
+[ -x "$TS" ] || TS="$(command -v tailscale 2>/dev/null)" || exit 0
+"$TS" status --json 2>/dev/null | python3 -c '
+import json, sys
+host = sys.argv[1].rstrip(".").lower()
+short = host.split(".")[0]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in (d.get("Peer") or {}).values():
+    dns = (p.get("DNSName") or "").rstrip(".").lower()
+    if dns == host or (p.get("HostName") or "").lower() == short:
+        for k in p.get("sshHostKeys") or []:
+            print(host, k)
+' "$host"

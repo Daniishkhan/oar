@@ -27,6 +27,7 @@ vm
   ssh [repo] [-- cmd...]        shell on the VM
   tunnel [repo] [ports...]      VM ports on localhost here (ssh -L)
   preview [repo] <port> [--public]   stable HTTPS URL (token-protected unless --public)
+  serve [repo] <port> [--off]   private tailnet URL https://oar-<repo>.<tailnet> → the VM's port
   setup [repo]                  re-copy setup/ and vm/ files and run the setup script
   snapshot [repo] <name>        named snapshot (boat new --from <name>)
   list
@@ -142,6 +143,16 @@ async function vmCmd(ctx: Ctx, args: string[]): Promise<number> {
     case 'setup': {
       const { values, positionals } = parse(rest, repoOpt)
       await vm.vmSetup(ctx, await repoArg(ctx, positionals[0], values.repo))
+      return 0
+    }
+    case 'serve': {
+      const { values, positionals } = parse(rest, { ...repoOpt, off: { type: 'boolean' } })
+      const repoName = positionals[0] && !/^\d+$/.test(positionals[0]) ? positionals[0] : undefined
+      const port = positionals.find((p) => /^\d+$/.test(p))
+      if (!port && !values.off) throw usage('serve needs a port')
+      await vm.vmServe(ctx, await repoArg(ctx, repoName, values.repo), Number(port ?? 0), {
+        off: Boolean(values.off),
+      })
       return 0
     }
     case 'snapshot': {

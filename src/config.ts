@@ -20,6 +20,8 @@ export interface Paths {
   knownHosts: string
   keyFile: string
   pubFile: string
+  /** KnownHostsCommand for tailnet aliases (installed by `pnpm install:local`). */
+  hostkeysCmd: string
 }
 
 export function paths(home: string = homedir()): Paths {
@@ -41,6 +43,7 @@ export function paths(home: string = homedir()): Paths {
     knownHosts: join(sshDir, 'oar_known_hosts'),
     keyFile: join(sshDir, 'oar_ed25519'),
     pubFile: join(sshDir, 'oar_ed25519.pub'),
+    hostkeysCmd: join(home, '.local', 'bin', 'oar-ts-hostkeys'),
   }
 }
 
@@ -89,12 +92,32 @@ export const ConfigSchema = z.object({
   gitIdentity: z
     .object({ name: z.string().min(1), email: z.string().email() })
     .default({ name: 'daniishkhan', email: 'danishafzalkhan@gmail.com' }),
+  /** With `enabled` and a `suffix`, `oar-<repo>` resolves to the tailnet name and boat's NAT endpoint becomes `oar-<repo>-direct`. */
+  tailscale: z
+    .object({
+      enabled: z.boolean().default(false),
+      suffix: z.string().optional(),
+      cli: z.string().default('/Applications/Tailscale.app/Contents/MacOS/Tailscale'),
+      tag: z.string().default('tag:oar'),
+    })
+    .default({
+      enabled: false,
+      cli: '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+      tag: 'tag:oar',
+    }),
   repos: z.record(z.string().regex(/^[a-z][a-z0-9-]{0,15}$/), RepoSchema),
 })
 export type Config = z.infer<typeof ConfigSchema>
 
+/** `oar-<repo>.<suffix>` when Tailscale is configured, else null. */
+export function tailnetHost(config: Config, repo: string): string | null {
+  const t = config.tailscale
+  return t.enabled && t.suffix ? `${sshAlias(repo)}.${t.suffix}` : null
+}
+
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
   version: 1,
+  tailscale: { enabled: true, suffix: 'tail1d8b49.ts.net' },
   repos: {
     engine: {
       remoteMatch: 'nodes-engine',
@@ -166,6 +189,8 @@ export const sshAlias = (repo: string) => `oar-${repo}`
 
 export interface Secrets {
   BOAT_API_KEY: string
+  /** Reusable, pre-approved, tagged Tailscale auth key; only needed when a VM first joins. */
+  TS_AUTHKEY?: string
 }
 
 /** KEY=value lines, `#` comments; the environment overrides the file. */
@@ -189,7 +214,9 @@ export function loadSecrets(p: Paths, env: NodeJS.ProcessEnv = process.env): Sec
     )
   }
   registerSecret(key)
-  return { BOAT_API_KEY: key }
+  const ts = env.TS_AUTHKEY || fromFile.TS_AUTHKEY
+  registerSecret(ts)
+  return { BOAT_API_KEY: key, TS_AUTHKEY: ts || undefined }
 }
 
 /** Which configured repo does the git checkout at `cwd` belong to? */

@@ -48,6 +48,9 @@ export const VmSchema = z.object({
   lastSeenState: z.enum(SandboxStates).optional(),
   archiveAfter: z.string().nullable().optional(),
   lastUsageDollars: z.number().optional(),
+  /** How the last successful ssh probe reached the VM. */
+  transport: z.enum(['tailnet', 'direct']).optional(),
+  tailscaleIp: z.string().optional(),
 })
 export type VmRecord = z.infer<typeof VmSchema>
 
