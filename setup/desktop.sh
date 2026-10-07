@@ -11,7 +11,7 @@ UID_NOW="$(id -u)"
 CHROME_PROFILE=/srv/oar/chrome
 PW_PATH="$HOME/.local/share/ms-playwright"
 PW_MCP_VERSION="0.0.81"          # matches nodes-engine's pin
-CDT_MCP_VERSION="${CDT_MCP_VERSION:-latest}"
+CDT_MCP_VERSION="${CDT_MCP_VERSION:-1.10.1}"   # pinned; bump deliberately
 
 # 1. Electron's sandbox needs unprivileged user namespaces; Ubuntu 24.04 restricts them by default.
 printf 'kernel.apparmor_restrict_unprivileged_userns = 0\n' | sudo tee /etc/sysctl.d/60-oar-userns.conf >/dev/null

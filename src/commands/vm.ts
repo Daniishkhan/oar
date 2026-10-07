@@ -264,7 +264,7 @@ async function setupTailscale(
   const code = await ssh.interactive(
     ctx.exec,
     via,
-    `OAR_TS_HOSTNAME=${sshAlias(repo)} bash /home/user/oar/setup/tailscale.sh`,
+    `OAR_TS_HOSTNAME=${sshAlias(repo)} OAR_TS_OPTIONAL=${key ? 0 : 1} bash /home/user/oar/setup/tailscale.sh`,
   )
   if (code !== 0)
     throw new OarError(

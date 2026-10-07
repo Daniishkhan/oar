@@ -40,7 +40,10 @@ sys.exit(0 if ok else 1)' "$HOSTNAME_TS"
 if joined; then
   echo "already joined as $HOSTNAME_TS"
 else
-  [ -s "$KEYFILE" ] || { echo "no auth key at $KEYFILE; run: oar vm setup <repo> with TS_AUTHKEY set" >&2; exit 1; }
+  if [ ! -s "$KEYFILE" ]; then
+    if [ "${OAR_TS_OPTIONAL:-0}" = 1 ]; then echo "tailscale: not joined and no auth key; skipping (set TS_AUTHKEY in ~/.config/oar/env)"; exit 0; fi
+    echo "no auth key at $KEYFILE; run: oar vm setup <repo> with TS_AUTHKEY set" >&2; exit 1
+  fi
   set +x   # keep the key out of the trace
   sudo tailscale up \
     --auth-key="file:$KEYFILE" \
