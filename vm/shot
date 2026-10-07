@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# shot <out.png> [window-title-substring]
+# Grabs the VM desktop (:0) as a PNG, or just one window (raised first). View it with Read.
+set -euo pipefail
+out="${1:-/tmp/oar/shot.png}"
+win="${2:-}"
+export DISPLAY="${DISPLAY:-:0}"
+mkdir -p "$(dirname "$out")"
+geom="1920x1080"
+off="+0,0"
+if [ -n "$win" ]; then
+  line="$(wmctrl -lG | grep -i -- "$win" | head -1 || true)"
+  [ -n "$line" ] || { echo "shot: no window matching '$win' (wmctrl -l lists them)" >&2; exit 2; }
+  id="$(echo "$line" | awk '{print $1}')"
+  x="$(echo "$line" | awk '{print $3}')"; y="$(echo "$line" | awk '{print $4}')"
+  w="$(echo "$line" | awk '{print $5}')"; h="$(echo "$line" | awk '{print $6}')"
+  wmctrl -i -a "$id" || true
+  sleep 0.3
+  geom="${w}x${h}"; off="+${x},${y}"
+fi
+ffmpeg -loglevel error -y -f x11grab -video_size "$geom" -i "${DISPLAY}${off}" -frames:v 1 "$out"
+echo "$out"

@@ -8,6 +8,7 @@ export HOME="${HOME:-/home/user}"
 HOSTNAME_TS="${OAR_TS_HOSTNAME:?set OAR_TS_HOSTNAME, e.g. oar-engine}"
 KEYFILE="$HOME/oar/ts-authkey"
 STATE_DIR=/etc/tailscale   # /etc is in boat snapshots; /var/lib (the default) is not
+trap 'rm -f "$KEYFILE"' EXIT   # the key is single-use here; never leave it on a snapshotted disk
 
 EXTRA_FLAGS=''
 [ -c /dev/net/tun ] || EXTRA_FLAGS='--tun=userspace-networking'
@@ -40,13 +41,15 @@ if joined; then
   echo "already joined as $HOSTNAME_TS"
 else
   [ -s "$KEYFILE" ] || { echo "no auth key at $KEYFILE; run: oar vm setup <repo> with TS_AUTHKEY set" >&2; exit 1; }
+  set +x   # keep the key out of the trace
   sudo tailscale up \
-    --auth-key="$(cat "$KEYFILE")" \
+    --auth-key="file:$KEYFILE" \
     --hostname="$HOSTNAME_TS" \
     --ssh \
     --advertise-tags=tag:oar \
     --accept-dns=false \
     --reset
+  set -x
   rm -f "$KEYFILE"
 fi
 

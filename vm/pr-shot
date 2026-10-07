@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# pr-shot <png> [label]
+# Puts an image where a PR body can show it: commits it to the `oar-evidence` branch of the
+# current repo (via a temporary worktree, so your task branch stays clean) and prints the
+# markdown to paste. Run from inside the repo or worktree.
+set -euo pipefail
+png="${1:?png path}"; label="${2:-screenshot}"
+[ -f "$png" ] || { echo "pr-shot: $png not found" >&2; exit 2; }
+root="$(git rev-parse --show-toplevel)"
+remote="$(git -C "$root" remote get-url origin)"
+slug="$(echo "$remote" | sed -E 's#.*[:/]([^/]+)/([^/]+?)(\.git)?$#\1/\2#')"
+branch="$(git -C "$root" rev-parse --abbrev-ref HEAD | tr '/' '-')"
+name="$(basename "$png")"
+dest="$branch/$(date -u +%Y%m%dT%H%M%SZ)-$name"
+tmp="$(mktemp -d)"
+cleanup() { git -C "$root" worktree remove --force "$tmp" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+if git -C "$root" ls-remote --exit-code --heads origin oar-evidence >/dev/null 2>&1; then
+  git -C "$root" fetch -q origin oar-evidence
+  git -C "$root" worktree add -q "$tmp" origin/oar-evidence -b "oar-evidence-tmp-$$" >/dev/null
+  git -C "$tmp" checkout -q -B oar-evidence
+else
+  git -C "$root" worktree add -q --detach "$tmp" >/dev/null
+  git -C "$tmp" checkout -q --orphan oar-evidence
+  git -C "$tmp" rm -rfq . >/dev/null 2>&1 || true
+fi
+mkdir -p "$tmp/$(dirname "$dest")"
+cp "$png" "$tmp/$dest"
+git -C "$tmp" add -f "$dest"
+git -C "$tmp" -c user.name="$(git config user.name)" -c user.email="$(git config user.email)" commit -q -m "evidence: $label ($branch)"
+git -C "$tmp" push -q origin oar-evidence:oar-evidence
+echo "![${label}](https://github.com/${slug}/blob/oar-evidence/${dest}?raw=true)"

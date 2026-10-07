@@ -233,8 +233,14 @@ async function setupTailscale(
   if (!tsHost) return
   const key = loadSecrets(ctx.paths).TS_AUTHKEY
   if (key) {
-    await ctx.boat.writeFile(id, '/home/user/oar/ts-authkey', `${key}\n`)
-    await runCommand(ctx.boat, id, 'chmod 600 /home/user/oar/ts-authkey', { timeoutSeconds: 30 })
+    // Over ssh stdin, so the key never transits boat's API or a command log; the script deletes it.
+    const put = await ctx.exec.run(
+      'ssh',
+      [...ssh.batchArgs, via, 'umask 077 && mkdir -p ~/oar && cat > ~/oar/ts-authkey'],
+      { input: `${key}\n`, timeoutMs: 30_000 },
+    )
+    if (put.code !== 0)
+      throw new OarError('ssh', `could not place the auth key on the VM: ${put.stderr.trim()}`)
   }
   log(
     `tailscale: joining as ${tsHost}${key ? '' : ' (no TS_AUTHKEY; only works if already joined)'}`,

@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-enable lingering for user (oar): /var/lib/systemd/linger is not in boat snapshots
+After=systemd-logind.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/loginctl enable-linger user
+
+[Install]
+WantedBy=multi-user.target
