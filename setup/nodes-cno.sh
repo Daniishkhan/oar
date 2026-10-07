@@ -23,8 +23,9 @@ docker compose -f deploy/local/compose.test.yml build django || true
 # Interview screen deps (make check.frontend).
 ( cd frontend/interview && npm ci --ignore-scripts --no-audit --no-fund ) || true
 
-# pre-commit hooks as `make lint` expects.
-uvx --from pre-commit==3.7.1 pre-commit install || true
+# pre-commit on PATH (~/.local/bin) so `make lint` uses the pinned version directly.
+uv tool install "pre-commit==3.7.1" --force || true
+pre-commit install || true
 
 graft build || echo "graft build failed; run it by hand once"
 echo "nodes-cno ready"

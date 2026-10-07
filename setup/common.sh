@@ -30,8 +30,12 @@ for b in pnpm pnpx graft; do [ -x "$GBIN/$b" ] && ln -sf "$GBIN/$b" "$HOME/.loca
 hash -r
 pnpm --version; graft --version
 
-# uv: Python toolchain manager (Synapse-Django) and `uvx` for pre-commit.
+# uv: Python toolchain manager (nodes-cno). The installer here ships only `uv`; `uvx` is a shim.
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+if [ ! -x "$HOME/.local/bin/uvx" ]; then
+  printf '#!/bin/sh\nexec uv tool run "$@"\n' > "$HOME/.local/bin/uvx"
+  chmod +x "$HOME/.local/bin/uvx"
+fi
 
 # Claude Code: user-level config for the VM. The real login is `claude auth login`, done once
 # interactively (oar vm new does it; `oar vm ssh <repo> -- claude auth login` repeats it).
