@@ -109,3 +109,19 @@ export function questionFrom(questionFile: string | null, paneTail: string): str
     ? `The agent stopped without writing question.md. Its last screen:\n\n\`\`\`\n${tail}\n\`\`\``
     : 'The agent stopped without saying why.'
 }
+
+/** Lines of the Claude Code TUI (status bars, prompt box, separators) that mean nothing on an issue. */
+const TUI_CHROME =
+  /^\s*(?:[✻✳◤▸⏵❯─│╭╰]|⏵⏵|bypass permissions|ctx \d+%|graft ·|Crunched for|Brewed for|Baked for|Cooked for|Simmered for)/u
+
+/** The agent's recent output without terminal chrome, trimmed to the last `max` lines. */
+export function cleanTail(text: string, max = 40): string {
+  const lines = text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((l) => l.replace(/\s+$/, ''))
+    .filter((l) => !TUI_CHROME.test(l))
+  const compact: string[] = []
+  for (const l of lines) if (l.trim() || compact.at(-1)?.trim()) compact.push(l)
+  return compact.slice(-max).join('\n').trim()
+}

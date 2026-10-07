@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { cleanTail, describe, expect, it } from 'vitest'
 import {
   factoryFooter,
   issueBrief,
@@ -6,6 +6,7 @@ import {
   questionPath,
   reviewBrief,
   roundToken,
+  cleanTail,
 } from '../../src/factory/brief.js'
 import type { Task } from '../../src/state.js'
 import type { HumanComment, IssueRow, ReviewComment } from '../../src/factory/types.js'
@@ -185,5 +186,27 @@ describe('questionFrom', () => {
 describe('roundToken', () => {
   it('formats the round marker', () => {
     expect(roundToken(3)).toBe('[oar r3]')
+  })
+})
+
+describe('cleanTail', () => {
+  it('drops Claude TUI chrome and collapses blank runs', () => {
+    const screen = [
+      '- Checks: pnpm verify passed.',
+      '',
+      '',
+      '✻ Brewed for 2m 25s · done 7:51 PM',
+      '',
+      '──────────────── eng-1-add-one-readme-senten-ed58 ─',
+      '❯ [oar r3] Read /home/user/oar/tasks/x/review-3.md and address it.',
+      '◤ graft · 5527 nodes / 15188 edges · ✓ synced',
+      '▸ ctx 7%',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · PR #151 · ← for agents',
+    ].join('\n')
+    expect(cleanTail(screen)).toBe('- Checks: pnpm verify passed.')
+  })
+  it('keeps only the last lines', () => {
+    const text = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n')
+    expect(cleanTail(text, 3)).toBe('line 47\nline 48\nline 49')
   })
 })

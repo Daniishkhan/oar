@@ -4,7 +4,7 @@ import type { Ctx } from '../context.js'
 import { prSnapshot } from '../github.js'
 import { agentState, readAgent, type LiveAgent } from '../runner.js'
 import { loadState, type Task } from '../state.js'
-import { questionPath } from './brief.js'
+import { cleanTail, questionPath } from './brief.js'
 import type { FactoryDb } from './db.js'
 import { checkRuns, GhFeed, reviewFeed, workflowRun } from './github.js'
 import type { Jobs } from './jobs.js'
@@ -81,7 +81,7 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
         facts.question = await ctx.boat.readFile(sandboxId, questionPath(task.id)).catch(() => null)
     }
     if (status !== 'working' && status !== 'exited' && status !== 'unknown')
-      facts.paneTail = await readAgent(ctx, cfg, handle, 40).catch(() => '')
+      facts.paneTail = cleanTail(await readAgent(ctx, cfg, handle, 60).catch(() => ''))
   }
 
   if (deps.githubDue && facts.pr && row.phase === 'review') {
