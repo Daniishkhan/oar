@@ -2,6 +2,7 @@ import { readAsset } from '../assets.js'
 import { ensureDeadline, runCommand, sandboxState, waitForState, waitUp } from '../boat.js'
 import { repoConfig, sshAlias, type RepoConfig } from '../config.js'
 import type { Ctx } from '../context.js'
+import { shq } from '../exec.js'
 import { OarError } from '../errors.js'
 import { HerdrMachine, localHerdr } from '../herdr.js'
 import * as ssh from '../ssh.js'
@@ -196,6 +197,14 @@ export async function vmSetup(ctx: Ctx, repo: string): Promise<void> {
   if (code !== 0)
     throw new OarError('ssh', `setup script exited ${code}`, `re-run with: oar vm setup ${repo}`)
   log('setup finished')
+  const { name, email } = ctx.config.gitIdentity
+  await runCommand(
+    ctx.boat,
+    id,
+    `git config --global user.name ${shq(name)} && git config --global user.email ${shq(email)}`,
+    { timeoutSeconds: 30 },
+  )
+  log(`git identity on the VM: ${name} <${email}>`)
 }
 
 export async function vmNew(
