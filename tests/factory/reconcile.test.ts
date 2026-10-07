@@ -54,6 +54,7 @@ const facts = (over: Partial<Facts> = {}): Facts => ({
   jobRunning: false,
   jobAgeMs: 0,
   blocked: false,
+  nudged: false,
   ...over,
 })
 
@@ -324,10 +325,17 @@ describe('decide: needs_input', () => {
     expect(find(a, 'set_phase')).toMatchObject({ phase: 'resuming', round: 2 })
     expect(find(a, 'resume')?.message).toContain('Use option B')
   })
-  it('follows an agent someone restarted by hand', () => {
+  it('follows an agent someone restarted by hand, and a round it finished on its own', () => {
     const a = decide(n(), facts({ agent: 'working', linearKey: 'needsInput' }), ctx)
     expect(kinds(a)).toEqual(['set_state', 'set_phase'])
     expect(decide(n(), facts({ agent: 'idle', linearKey: 'needsInput' }), ctx)).toEqual([])
+    const done = decide(
+      n({ prNumber: 7, roundStartSha: 'old' }),
+      facts({ agent: 'idle', linearKey: 'needsInput', marker: true, pr: pr({ headSha: 'new' }) }),
+      ctx,
+    )
+    expect(find(done, 'set_state')?.state).toBe('inReview')
+    expect(find(done, 'set_phase')?.phase).toBe('review')
   })
 })
 

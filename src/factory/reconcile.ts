@@ -59,6 +59,45 @@ const merged = (ctx: DecideContext, row: IssueRow, f: Facts): Action[] => [
   { kind: 'event', name: 'merged', detail: f.pr?.url ?? '' },
 ]
 
+/** The agent touched `done`: either new commits reached the PR, or a later round had nothing to change. */
+const roundComplete = (row: IssueRow, f: Facts): Action[] | null => {
+  if (!f.marker || !f.pr || f.pr.state !== 'OPEN') return null
+  if (f.pr.headSha !== row.roundStartSha) {
+    const actions: Action[] = []
+    if (row.prNumber !== f.pr.number) actions.push({ kind: 'link_pr', url: f.pr.url })
+    actions.push(
+      {
+        kind: 'comment',
+        key: `pr-${row.round}`,
+        body: `${row.round <= 1 ? 'Draft PR' : `Round ${row.round} pushed`}: ${f.pr.url}. Review it on GitHub; review comments and a red CI come back to the agent on their own, and a comment here does too.${fence(f.paneTail, 1200)}`,
+      },
+      { kind: 'set_state', state: 'inReview' },
+      {
+        kind: 'set_phase',
+        phase: 'review',
+        prNumber: f.pr.number,
+        prUrl: f.pr.url,
+        reviewCursor: f.nowIso,
+        roundStartSha: f.pr.headSha,
+      },
+      { kind: 'event', name: 'review', detail: `round ${row.round} ${f.pr.url}` },
+    )
+    return actions
+  }
+  if (row.round > 1)
+    return [
+      {
+        kind: 'comment',
+        key: `noop-${row.round}`,
+        body: `Round ${row.round} ended without new commits; the agent's reply:${fence(f.paneTail, 1200)}`,
+      },
+      { kind: 'set_state', state: 'inReview' },
+      { kind: 'set_phase', phase: 'review', reviewCursor: f.nowIso },
+      { kind: 'event', name: 'review', detail: `round ${row.round} (no changes)` },
+    ]
+  return null
+}
+
 const needsInput = (key: string, body: string): Action[] => [
   { kind: 'comment', key, body },
   { kind: 'set_state', state: 'needsInput' },
@@ -88,6 +127,23 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           { kind: 'set_phase', phase: 'failed' },
         ]
       if (f.blocked || f.jobRunning || !f.slotFree) return []
+      if (row.taskId && row.prNumber)
+        // Moved back to Ready after a PR exists: continue the conversation, do not re-brief.
+        return [
+          {
+            kind: 'set_phase',
+            phase: 'resuming',
+            jobStartedAt: f.nowIso,
+            round: row.round + 1,
+            roundStartSha: f.pr?.headSha ?? row.roundStartSha,
+          },
+          { kind: 'event', name: 'resume', detail: `round ${row.round + 1} (moved to Ready)` },
+          {
+            kind: 'resume',
+            message: `${roundToken(row.round + 1)} The issue was moved back to Ready. The PR ${row.prUrl ?? ''} already exists: re-read the brief, finish whatever is left, push to the same branch, \`touch\` the done marker, and reply with a summary.`,
+            deliver: f.undelivered,
+          },
+        ]
       return [
         { kind: 'set_phase', phase: 'dispatching', jobStartedAt: f.nowIso },
         { kind: 'event', name: 'dispatch', detail: `round ${row.round + 1}` },
@@ -153,42 +209,9 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             `The PR ${f.pr.url} was closed without merging. Reply here with what to do next, or cancel the issue.`,
           ),
         )
-      if (f.marker) {
-        if (f.pr && f.pr.state === 'OPEN' && f.pr.headSha !== row.roundStartSha) {
-          const actions: Action[] = []
-          if (row.prNumber !== f.pr.number) actions.push({ kind: 'link_pr', url: f.pr.url })
-          actions.push(
-            {
-              kind: 'comment',
-              key: `pr-${row.round}`,
-              body: `${row.round <= 1 ? 'Draft PR' : `Round ${row.round} pushed`}: ${f.pr.url}. Review it on GitHub; review comments and a red CI come back to the agent on their own, and a comment here does too.${fence(f.paneTail, 1200)}`,
-            },
-            { kind: 'set_state', state: 'inReview' },
-            {
-              kind: 'set_phase',
-              phase: 'review',
-              prNumber: f.pr.number,
-              prUrl: f.pr.url,
-              reviewCursor: f.nowIso,
-              roundStartSha: f.pr.headSha,
-            },
-            { kind: 'event', name: 'review', detail: `round ${row.round} ${f.pr.url}` },
-          )
-          return actions
-        }
-        if (row.round > 1 && f.pr && f.pr.state === 'OPEN')
-          // A review or CI round can legitimately end with nothing to change; the agent's reply
-          // goes back on the issue and the PR waits for the next review.
-          return [
-            {
-              kind: 'comment',
-              key: `noop-${row.round}`,
-              body: `Round ${row.round} ended without new commits; the agent's reply:${fence(f.paneTail, 1200)}`,
-            },
-            { kind: 'set_state', state: 'inReview' },
-            { kind: 'set_phase', phase: 'review', reviewCursor: f.nowIso },
-            { kind: 'event', name: 'review', detail: `round ${row.round} (no changes)` },
-          ]
+      const complete = roundComplete(row, f)
+      if (complete) return complete
+      if (f.marker)
         return needsInput(
           `nopush-${row.round}`,
           withMention(
@@ -196,7 +219,6 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             `The agent reported done but nothing new reached GitHub${f.pr ? '' : ' and there is no PR'}. Reply here with what to do, or attach with ${attachHint(ctx.identifier)}.${fence(f.paneTail, 800)}`,
           ),
         )
-      }
       if (f.undelivered.length)
         return f.undelivered.map((c) => ({ kind: 'deliver', comment: c, mode: 'prompt' }) as Action)
       if (f.question)
@@ -226,6 +248,8 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             { kind: 'set_state', state: 'inProgress' },
             { kind: 'set_phase', phase: 'building' },
           ]
+        // The agent finished on its own (its background jobs ended, or a human attached).
+        if (f.agent === 'idle' || f.agent === 'done') return roundComplete(row, f) ?? []
         return []
       }
       if (f.agent === 'vm-down' || f.agent === 'exited')

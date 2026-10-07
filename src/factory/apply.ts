@@ -221,6 +221,18 @@ export class Applier {
         case 'deliver':
           await this.deliver(current, a.comment, a.mode)
           break
+        case 'nudge': {
+          const task = taskFor(this.ctx, current)
+          const handle = herdrHandle(task)
+          if (!handle) break
+          // Recorded first: a nudge is at-most-once per round whatever happens next.
+          db.event('nudge', `r${current.round}`, current.id, task?.id ?? null)
+          await promptAgent(this.ctx, repoConfig(this.ctx.config, current.repo), handle, a.text, {
+            confirm: true,
+            log,
+          }).catch((e: Error) => log(`${current.identifier}: nudge not delivered: ${firstLine(e)}`))
+          break
+        }
         case 'dispatch':
           void jobs.run(
             current.id,

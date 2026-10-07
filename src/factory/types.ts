@@ -120,6 +120,8 @@ export interface Facts {
   jobAgeMs: number
   /** Issues this one is blocked by that are not done yet. */
   blocked: boolean
+  /** The agent was already nudged this round (idle without the marker). */
+  nudged: boolean
 }
 
 export interface Limits {
@@ -157,6 +159,7 @@ export type Action =
       reviewCursor?: string
       jobStartedAt?: string | null
     }
+  | { kind: 'nudge'; text: string }
   | { kind: 'stop_agent' }
   | { kind: 'close_task' }
   | { kind: 'event'; name: string; detail?: string }

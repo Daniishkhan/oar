@@ -50,6 +50,7 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
       const b = deps.db.issue(id)
       return Boolean(b && !DONE_TYPES.has(b.linearStateType))
     }),
+    nudged: deps.db.hasEvent(row.id, 'nudge', `r${row.round}`),
   }
   if (!row.taskId) return facts
   const task: Task | undefined = loadState(ctx.paths).tasks[row.taskId]
