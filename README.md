@@ -138,5 +138,6 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] boat `sshKey` appends (not replaces) authorized keys: the Mac's and the controller's keys both stay on the workers (2026-10-08); every host re-appends its own key on `vm up` anyway
 - [x] `ttlSeconds: null` accepted at creation for the controller sandbox; `archiveAfter` reads null (2026-10-08, bx_w55wbqrq)
 - [x] Linux Herdr client forwards `--machine` to another VM: `herdr machine add oar-engine --label engine --remote-session default` on the controller, then `herdr --machine engine agent list` answers (2026-10-08)
-- [ ] Linear client-credentials token works for `viewer`, `issueUpdate`, `commentCreate` with a client id, `workflowStateCreate`
-- [ ] A comment from the "oar" app user pushes to the phone
+- [x] Linear client-credentials token works for `viewer` (app user "oar"), `issueUpdate`, `commentCreate` with a client id and `attachmentLinkGitHubPR`; `workflowStateCreate` is refused ("not allowed to take action"), so `oar factory setup` reports missing states and they are added in Settings → Teams → Issue statuses (2026-10-08)
+- [ ] A comment from the "oar" app user pushes to the phone (it does raise an Inbox notification in Linear, 2026-10-08)
+- [x] First live issue ENG-1 → draft PR nodes-engine #151 → In Review in 4 min; a PR comment started round 2 and the agent pushed the fix in 3 min; a merge closed it (2026-10-08). Learned on the way: a cancelled check is not a failure, boat's transient `updating` sandbox state must be waited out, agents pause for their own background shells (one nudge before Needs Input), and a re-queued issue with a PR is resumed rather than re-briefed
