@@ -113,9 +113,9 @@ async function createWorktree(
     if (/trust/i.test(text))
       return machine.call([...wtArgs, '--trust-repository'], Created, 120_000)
     if (/exist|already/i.test(text)) {
-      log(`worktree ${task.worktreePath} already exists; opening it`)
+      log(`worktree ${task.worktreePath} already exists; opening a workspace in it`)
       return machine.call(
-        ['worktree', 'open', '--path', task.worktreePath, '--no-focus'],
+        ['workspace', 'create', '--cwd', task.worktreePath, '--label', task.slug, '--no-focus'],
         Created,
         120_000,
       )
@@ -377,7 +377,7 @@ export async function resumeHerdr(
     return handle
   }
   const opened = await machine.call(
-    ['worktree', 'open', '--path', task.worktreePath, '--no-focus'],
+    ['workspace', 'create', '--cwd', task.worktreePath, '--label', task.slug, '--no-focus'],
     Created,
     120_000,
   )
