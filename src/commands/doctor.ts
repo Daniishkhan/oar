@@ -122,11 +122,7 @@ export async function doctor(
       const ok = Boolean(
         login && login.exitCode === 0 && /loggedIn"?\s*:\s*true|claude\.ai/.test(login.stdout),
       )
-      push(
-        `${name}: claude login on VM`,
-        ok,
-        ok ? 'claude.ai' : `oar vm login ${name}`,
-      )
+      push(`${name}: claude login on VM`, ok, ok ? 'claude.ai' : `oar vm login ${name}`)
       const codex = await runCommand(ctx.boat, vm.sandboxId, 'codex login status 2>&1 | head -1', {
         timeoutSeconds: 60,
       }).catch(() => null)
@@ -136,7 +132,7 @@ export async function doctor(
         codexOk,
         codexOk
           ? codex!.stdout.trim()
-          : oar vm login ${name} --codex, or copy ~/.codex/auth.json to the VM and run oar-creds save,
+          : `oar vm login ${name} --codex, or copy ~/.codex/auth.json to the VM and run oar-creds save`,
       )
       const repoDir = await runCommand(
         ctx.boat,
