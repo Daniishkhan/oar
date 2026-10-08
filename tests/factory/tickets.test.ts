@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readPlanFile, ticketCreate, ticketDryRun } from '../../src/commands/ticket.js'
 import type { LinearClient } from '../../src/factory/linear.js'
-import { publishPlan, refreshPlan } from '../../src/factory/publication.js'
+import { publicationSource, publishPlan, refreshPlan } from '../../src/factory/publication.js'
 import {
   EXAMPLE_PLAN,
   orderTickets,
@@ -378,6 +379,40 @@ describe('oar ticket create', () => {
     await expect(
       refreshPlan({ path: unpublished, linear: linear as unknown as LinearClient }),
     ).rejects.toThrow('not been published')
+    // A receipt that points at an issue this publication did not create is never overwritten.
+    linear.calls = []
+    const tampered = readPlanFile(path)
+    tampered.created.tickets['slow-requests'] = 'CNO-2'
+    writeFileSync(path, JSON.stringify(tampered))
+    await expect(refreshPlan({ path, linear: linear as unknown as LinearClient })).rejects.toThrow(
+      'not the issue this publication created',
+    )
+    expect(linear.calls.filter((c) => c.startsWith('update'))).toEqual([])
+  })
+
+  it('keeps the content hash of a plan published before the questions field existed', () => {
+    const { w, path } = setup()
+    const legacy = {
+      ...EXAMPLE_PLAN,
+      tickets: EXAMPLE_PLAN.tickets.map(({ questions: _q, ...t }) => t),
+    }
+    writeFileSync(path, JSON.stringify(legacy))
+    const plan = readPlanFile(path)
+    expect(plan.tickets.every((t) => t.questions.length === 0)).toBe(true)
+    const before = createHash('sha256')
+      .update(
+        JSON.stringify({
+          team: plan.team,
+          plan: plan.plan,
+          tickets: plan.tickets.map(({ questions: _q, ...t }) => t),
+          document: undefined,
+        }),
+      )
+      .digest('hex')
+    expect(publicationSource(path, plan).contentHash).toBe(before)
+    plan.tickets[1]!.questions = ['Which threshold?']
+    expect(publicationSource(path, plan).contentHash).not.toBe(before)
+    void w
   })
 
   it('resumes after a failure without creating anything twice', async () => {

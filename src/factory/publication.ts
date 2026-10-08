@@ -66,6 +66,14 @@ export function readPlanFile(path: string): PlanFile {
   return parsed.data
 }
 
+/**
+ * Fields added to the schema after the first plans were published are hashed only when set,
+ * so an older publication keeps its hash when its file is parsed with the newer defaults.
+ */
+function hashedTickets(tickets: PlanFile['tickets']): unknown[] {
+  return tickets.map(({ questions, ...rest }) => (questions.length ? { ...rest, questions } : rest))
+}
+
 /** Hash semantic input, not receipts or JSON formatting. Markdown is part of the input. */
 export function publicationSource(
   path: string,
@@ -99,7 +107,14 @@ export function publicationSource(
     if (!content.trim()) throw usage(`plan document ${plan.document} is empty`)
   }
   const contentHash = createHash('sha256')
-    .update(JSON.stringify({ team: plan.team, plan: plan.plan, tickets: plan.tickets, document }))
+    .update(
+      JSON.stringify({
+        team: plan.team,
+        plan: plan.plan,
+        tickets: hashedTickets(plan.tickets),
+        document,
+      }),
+    )
     .digest('hex')
   if (plan.publication && plan.publication.contentHash !== contentHash)
     throw new OarError(
@@ -418,8 +433,21 @@ export async function refreshPlan(options: {
   path: string
   linear: PublicationLinear
 }): Promise<{ parent: PublishedIssue | null; tickets: Array<PublishedIssue & { key: string }> }> {
-  const plan = readPlanFile(options.path)
-  const source = publicationSource(options.path, plan)
+  const path = realpathSync(options.path)
+  const release = lockPlan(path)
+  try {
+    return await refreshLocked(path, options.linear)
+  } finally {
+    release()
+  }
+}
+
+async function refreshLocked(
+  path: string,
+  linear: PublicationLinear,
+): Promise<{ parent: PublishedIssue | null; tickets: Array<PublishedIssue & { key: string }> }> {
+  const plan = readPlanFile(path)
+  const source = publicationSource(path, plan)
   if (!plan.publication)
     throw new OarError(
       'state_invalid',
@@ -435,19 +463,29 @@ export async function refreshPlan(options: {
       'oar ticket create finishes the publication first',
     )
   const context: PublicationContext = { id: plan.publication.id, ...source }
-  const { linear } = options
+  const { operations } = plan.publication
+  // Only an issue this publication created (its Linear id is the operation id saved before the
+  // create) is ever overwritten; a receipt that points anywhere else is refused.
+  const owned = async (ref: string, operationId: string | undefined, what: string) => {
+    const issue = await linear.issue(ref)
+    if (!issue) throw new OarError('state_invalid', `${ref} (${what}) no longer exists`)
+    if (!operationId || issue.id !== operationId)
+      throw new OarError(
+        'state_invalid',
+        `${ref} (${what}) is not the issue this publication created; refusing to overwrite it`,
+        'restore the original tickets.json, or publish a new revision',
+      )
+    return issue
+  }
   let parent: PublishedIssue | null = null
   if (plan.plan && plan.created.plan) {
-    const issue = await linear.issue(plan.created.plan)
-    if (!issue)
-      throw new OarError('state_invalid', `${plan.created.plan} (the plan issue) no longer exists`)
+    const issue = await owned(plan.created.plan, operations.plan, 'the plan issue')
     parent = { ...issue, title: plan.plan.title }
   }
   const made = new Map<string, PublishedIssue>()
   for (const t of order) {
     const ref = plan.created.tickets[t.key]!
-    const issue = await linear.issue(ref)
-    if (!issue) throw new OarError('state_invalid', `${ref} (ticket ${t.key}) no longer exists`)
+    const issue = await owned(ref, operations.tickets[t.key], `ticket ${t.key}`)
     made.set(t.key, { ...issue, title: t.title })
   }
   for (const t of order)
