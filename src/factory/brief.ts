@@ -9,8 +9,23 @@ export const reviewPath = (taskId: string, round: number) =>
   `${vmTaskDir(taskId)}/review-${round}.md`
 export const roundToken = (round: number) => `[oar r${round}]`
 
+/** The plan issue a ticket belongs to (its Linear parent), given to the agent as context. */
+export interface ParentPlan {
+  identifier: string
+  title: string
+  url: string
+  description: string
+}
+
+const PLAN_MAX_CHARS = 8000
+
 /** The markdown the agent reads first: the issue as the human wrote it, plus the discussion so far. */
-export function issueBrief(issue: IssueRow, comments: HumanComment[], repoName: string): string {
+export function issueBrief(
+  issue: IssueRow,
+  comments: HumanComment[],
+  repoName: string,
+  parent: ParentPlan | null = null,
+): string {
   const lines = [
     `# ${issue.identifier}: ${issue.title}`,
     '',
@@ -23,6 +38,19 @@ export function issueBrief(issue: IssueRow, comments: HumanComment[], repoName: 
     issue.description.trim() || '(no description; the title is the whole request)',
     '',
   ]
+  if (parent) {
+    const plan = parent.description.trim()
+    lines.push(
+      `## The plan this ticket belongs to: ${parent.identifier} ${parent.title}`,
+      '',
+      `${parent.url}. For context only: build this ticket and nothing else from the plan; the other tickets are built separately.`,
+      '',
+      plan.length > PLAN_MAX_CHARS
+        ? `${plan.slice(0, PLAN_MAX_CHARS)}\n\n…(truncated; read the rest on Linear)`
+        : plan,
+      '',
+    )
+  }
   if (comments.length) {
     lines.push('## Discussion so far', '')
     for (const c of comments) {

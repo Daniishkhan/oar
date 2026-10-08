@@ -14,6 +14,7 @@ import { hoursFromNow, nowIso } from '../time.js'
 import {
   factoryFooter,
   issueBrief,
+  type ParentPlan,
   questionPath,
   reviewBrief,
   reviewPath,
@@ -96,9 +97,15 @@ const taskFor = (ctx: Ctx, row: IssueRow): Task | undefined =>
   row.taskId ? loadState(ctx.paths).tasks[row.taskId] : undefined
 
 /** The oar task for an issue, created on first use; the brief is rewritten with the latest discussion. */
-async function ensureTask(ctx: Ctx, row: IssueRow, cfg: RepoConfig, db: FactoryDb): Promise<Task> {
+async function ensureTask(
+  ctx: Ctx,
+  row: IssueRow,
+  cfg: RepoConfig,
+  db: FactoryDb,
+  parent: ParentPlan | null,
+): Promise<Task> {
   const { slug, id } = taskIdentity(row)
-  const brief = issueBrief(row, db.commentsFor(row.id), row.repo)
+  const brief = issueBrief(row, db.commentsFor(row.id), row.repo, parent)
   const briefPath = writeBrief(ctx.paths, id, brief)
   const existing = loadState(ctx.paths).tasks[id]
   if (existing) return existing
@@ -312,6 +319,22 @@ export class Applier {
       `${this.deps.mention ? `${this.deps.mention} ` : ''}Could not ${what}: ${msg}. Move the issue back to ${this.deps.stateNames.ready} to retry${e instanceof OarError && e.hint ? ` (${e.hint})` : ''}.`,
     ).catch(() => undefined)
     await this.setState(fresh, 'needsInput').catch(() => undefined)
+  }
+
+  /** The issue's Linear parent when it is a plan, for the brief; null when there is none or Linear fails. */
+  private async parentPlan(row: IssueRow): Promise<ParentPlan | null> {
+    const { linear, log } = this.deps
+    try {
+      const self = await linear.issue(row.id)
+      if (!self?.parentId) return null
+      const p = await linear.issue(self.parentId)
+      return p
+        ? { identifier: p.identifier, title: p.title, url: p.url, description: p.description }
+        : null
+    } catch (e) {
+      log(`${row.identifier}: could not read the parent plan: ${firstLine(e)}`)
+      return null
+    }
   }
 
   /** The job-side twin of decide's needsInput: park the issue and tell the human, never terminally. */
@@ -541,7 +564,8 @@ export class Applier {
           createdAt: c.createdAt,
         })
       }
-      const task = await ensureTask(this.ctx, row, cfg, db)
+      const parent = await this.parentPlan(row)
+      const task = await ensureTask(this.ctx, row, cfg, db, parent)
       const round = row.round + 1
       const result = await dispatchTask(this.ctx, task, {
         log,

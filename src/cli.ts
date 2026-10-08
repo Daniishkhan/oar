@@ -4,6 +4,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util'
 import { doctor } from './commands/doctor.js'
 import { factoryCmd } from './commands/factory.js'
 import { status } from './commands/status.js'
+import { ticketCmd } from './commands/ticket.js'
 import * as task from './commands/task.js'
 import * as vm from './commands/vm.js'
 import { watch } from './commands/watch.js'
@@ -20,6 +21,7 @@ const HELP = `oar — remote coding on boat.dev (one VM per repo, Herdr on the V
   oar watch [--until-idle]      poll live tasks, notify on blocked/done, keep the VM alive
   oar doctor [--repo r] [--quiet]
   oar factory setup|deploy|status|log|pause|resume|attach|up|stop|doctor|states
+  oar ticket example|check|create   a planned piece of work → Linear tickets in Backlog
 
 vm
   new <repo> [--no-login] [--type small|default|large]   create from the boat environment, run setup, log Claude in, register in Herdr
@@ -58,6 +60,12 @@ factory (an always-on controller VM turns Linear issues into tasks on the repo V
   pause | resume                stop/allow new dispatches
   attach <ENG-12>               focus the issue's agent on its worker and attach Herdr
   up | stop                     the controller sandbox itself
+
+ticket (turn an approved plan into Linear tickets; see the oar skill's tickets.md)
+  example                       print a valid plan file
+  check <plan.json>             validate and show the rendered tickets; nothing is sent
+  create <plan.json> [--dry-run]   create the plan issue (label spec) and its tickets in Backlog,
+                                with blocked-by links; ids are written back so a re-run resumes
   doctor | states               controller health; create missing Linear workflow states
 
 Repo is inferred from the current git checkout's origin when omitted. Exit codes: 1 error, 2 usage, 3 agent blocked.`
@@ -324,6 +332,8 @@ export async function main(argv: string[], ctx: Ctx = buildCtx()): Promise<numbe
       return taskCmd(ctx, rest)
     case 'factory':
       return factoryCmd(ctx, rest)
+    case 'ticket':
+      return ticketCmd(ctx, rest)
     case 'status': {
       const { values } = parse(rest, { all: { type: 'boolean' } })
       await status(ctx, { all: Boolean(values.all) })

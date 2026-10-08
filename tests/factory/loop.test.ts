@@ -103,6 +103,7 @@ const issue = (over: Partial<LinearIssue> = {}): LinearIssue => ({
   state: { id: 'st-Ready', name: 'Ready', type: 'unstarted' },
   labels: [],
   parentId: null,
+  hasChildren: false,
   blockedBy: [],
   ...over,
 })
@@ -320,6 +321,48 @@ describe('Factory end to end (fakes)', () => {
     await tick(f)
     expect(db.issue(row.id)!.phase).toBe('building')
     expect(db.issue(row.id)!.round).toBe(2)
+  })
+
+  it('records a plan issue (label spec) but never builds it', async () => {
+    const { linear, db, f, prompts } = setup()
+    linear.issues.push(issue({ labels: ['spec'] }))
+    await tick(f)
+    expect(db.issueByIdentifier('ENG-1')!.phase).toBe('closed')
+    expect(prompts).toEqual([])
+    expect(db.events({ limit: 10 }).map((e) => e.kind)).toContain('not-built')
+    // moving it again does not re-queue it
+    linear.issues[0]!.updatedAt = '2026-10-07T19:05:00.000Z'
+    await tick(f)
+    expect(db.issueByIdentifier('ENG-1')!.phase).toBe('closed')
+  })
+
+  it('treats an issue with sub-issues as a plan even without the label', async () => {
+    const { linear, db, f, prompts } = setup()
+    linear.issues.push(issue({ hasChildren: true }))
+    await tick(f)
+    expect(db.issueByIdentifier('ENG-1')!.phase).toBe('closed')
+    expect(prompts).toEqual([])
+  })
+
+  it("puts the parent plan into a ticket's brief", async () => {
+    const { w, linear, db, f } = setup()
+    linear.issues.push(
+      issue({
+        id: 'plan-1',
+        identifier: 'ENG-9',
+        title: 'Trace requests',
+        description: 'The whole plan.',
+        labels: ['spec'],
+        state: { id: 'st-Backlog', name: 'Backlog', type: 'backlog' },
+      }),
+      issue({ parentId: 'plan-1' }),
+    )
+    await tick(f)
+    const row = db.issueByIdentifier('ENG-1')!
+    expect(row.phase).toBe('building')
+    const brief = w.boat.files.get(`bx_1:/home/user/oar/tasks/${row.taskId}/brief.md`)
+    expect(brief).toContain('## The plan this ticket belongs to: ENG-9 Trace requests')
+    expect(brief).toContain('The whole plan.')
   })
 
   it('pauses new dispatches but keeps observing', async () => {

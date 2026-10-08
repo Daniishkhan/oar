@@ -217,6 +217,30 @@ describe('cleanTail', () => {
   })
 })
 
+describe('plan context in the brief', () => {
+  it('adds the parent plan as context and says to build only this ticket', () => {
+    const text = issueBrief(issue(), [], 'engine', {
+      identifier: 'ENG-9',
+      title: 'Trace requests',
+      url: 'https://linear.app/x/ENG-9',
+      description: 'Why we do this.\n\n## Tickets\n1. ENG-12 Add retries',
+    })
+    expect(text).toContain('## The plan this ticket belongs to: ENG-9 Trace requests')
+    expect(text).toContain('build this ticket and nothing else from the plan')
+    expect(text).toContain('Why we do this.')
+    expect(text.indexOf('## Issue')).toBeLessThan(text.indexOf('## The plan'))
+  })
+  it('truncates a very long plan', () => {
+    const text = issueBrief(issue(), [], 'engine', {
+      identifier: 'ENG-9',
+      title: 'T',
+      url: 'u',
+      description: 'x'.repeat(9000),
+    })
+    expect(text).toContain('…(truncated; read the rest on Linear)')
+  })
+})
+
 describe('automated review in briefs', () => {
   it('tags blocking findings and says what blocking means', () => {
     const c: ReviewComment[] = [

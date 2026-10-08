@@ -113,7 +113,16 @@ its own and notify you; `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` in `~/.config/
 (`LINEAR_API_KEY` works as a fallback, without notifications). Per Linear team, set the GitHub
 PR automation to _merged → Done_ only.
 
+Tickets come from a planning session: Claude, using the oar skill's
+[tickets.md](skill/tickets.md), writes the approved plan as a JSON file and `oar ticket create`
+turns it into a parent issue labelled `spec`, which the controller never builds, and one
+sub-issue per ticket in Backlog. Each ticket has Goal, Jobs to be done, Functional and
+Non-functional criteria, Scope, Decisions and a Staging check, and "blocked by" links set the
+order. A ticket's brief includes its parent plan.
+
 ```bash
+oar ticket check plan.json   # validate and show the rendered tickets
+oar ticket create plan.json  # plan issue + tickets in Backlog; ids written back, a re-run resumes
 oar factory setup            # controller VM, bundle, tailnet, worker keys + Herdr profiles, states, service
 oar factory status           # phases per issue, VMs, last tick (forwarded over ssh)
 oar factory log ENG-12 -f    # the controller's event log
@@ -151,7 +160,7 @@ Unit tests use a scripted fake boat client (`tests/fakes/boat.ts`) and a recordi
 | [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client          |
 | [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                         |
 | [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                             |
-| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor` and `factory` subcommands                               |
+| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor`, `factory` and `ticket` subcommands                     |
 | [src/factory/](src/factory)                                                                | The controller, below                                                                             |
 | [setup/](setup), [vm/](vm), [templates/](templates), [skill/](skill)                       | VM setup scripts and units, files copied onto VMs, brief and reviewer templates, the Claude skill |
 
@@ -170,6 +179,7 @@ issue observe, decide and apply, then the keeper.
 - [linear.ts](src/factory/linear.ts), [github.ts](src/factory/github.ts), [review.ts](src/factory/review.ts),
   [brief.ts](src/factory/brief.ts) and [keeper.ts](src/factory/keeper.ts) hold the Linear client,
   the GitHub feeds, the automated reviewer, the agent-facing text and VM uptime.
+  [tickets.ts](src/factory/tickets.ts) is the plan-file schema and the ticket template.
 
 Rules that keep the controller safe to restart at any moment:
 
@@ -186,7 +196,7 @@ action and job driven by config, not a per-repo branch in the code.
 ### Roadmap
 
 Built: the CLI, the controller, questions and replies through Linear, review and CI rounds, the
-staging result, automated P0/P1 review and auto-merge. Next: a separate verify sandbox (UI and
+staging result, automated P0/P1 review and auto-merge, plans turned into tickets. Next: a separate verify sandbox (UI and
 end-to-end checks), a `validate` gate after staging and automatic promotion, inspection and spec
 recipes that write Linear issues, parallel builds on forked VMs, and HTML or Figma prototyping.
 

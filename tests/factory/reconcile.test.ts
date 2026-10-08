@@ -122,6 +122,9 @@ const find = <K extends Action['kind']>(actions: Action[], kind: K) =>
   actions.find((a): a is Extract<Action, { kind: K }> => a.kind === kind)
 
 describe('decide: queued', () => {
+  it('never dispatches a plan issue or another non-build kind', () => {
+    expect(decide(row({ kind: 'spec' }), facts(), ctx)).toEqual([])
+  })
   it('dispatches a Ready issue when the slot is free', () => {
     const a = decide(row(), facts(), ctx)
     expect(kinds(a)).toEqual(['set_phase', 'event', 'dispatch'])

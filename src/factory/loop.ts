@@ -171,7 +171,10 @@ export class Factory {
   private upsert(i: LinearIssue): void {
     const repo = this.teams[i.teamKey]
     if (!repo || !this.ctx.config.repos[repo]) return
-    const kind = i.labels.map((l) => l.toLowerCase()).find((l) => KINDS.has(l)) ?? 'build'
+    // A label names the kind; an issue with sub-issues is a plan even without the `spec` label.
+    const kind =
+      i.labels.map((l) => l.toLowerCase()).find((l) => KINDS.has(l)) ??
+      (i.hasChildren ? 'spec' : 'build')
     const before = this.db.issue(i.id)
     const row = this.db.upsertIssue({
       id: i.id,
@@ -192,6 +195,14 @@ export class Factory {
       createdAt: i.createdAt,
     })
     if (!before) this.db.event('seen', `${i.identifier} ${i.state.name}`, i.id)
+    // Only `build` issues are built; a plan issue (label `spec`) and the later recipe kinds are recorded and left alone.
+    if (kind !== 'build') {
+      if (row.phase === 'queued') {
+        this.db.updateIssue(row.id, { phase: 'closed' })
+        this.db.event('not-built', `${i.identifier} is a ${kind} issue`, row.id)
+      }
+      return
+    }
     const reopenable = row.phase === 'closed' || row.phase === 'failed' || row.phase === 'merged'
     if (
       reopenable &&

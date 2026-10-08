@@ -29,6 +29,8 @@ export interface LinearIssue {
   state: { id: string; name: string; type: string }
   labels: string[]
   parentId: string | null
+  /** The issue has sub-issues: it is a plan, never built itself. */
+  hasChildren: boolean
   /** Ids of blockers whose state type is not completed/canceled. */
   blockedBy: string[]
 }
@@ -101,6 +103,7 @@ fragment IssueFields on Issue {
   state { id name type }
   labels { nodes { name } }
   parent { id }
+  children(first: 1) { nodes { id } }
   inverseRelations { nodes { type issue { id state { type } } } }
 }`
 
@@ -123,6 +126,7 @@ const issueNode = z.looseObject({
   state: z.looseObject({ id: z.string(), name: z.string(), type: z.string() }),
   labels: z.looseObject({ nodes: z.array(z.looseObject({ name: z.string() })) }).nullish(),
   parent: z.looseObject({ id: z.string() }).nullish(),
+  children: z.looseObject({ nodes: z.array(z.looseObject({ id: z.string() })) }).nullish(),
   inverseRelations: z
     .looseObject({
       nodes: z.array(
@@ -167,6 +171,7 @@ const toIssue = (n: IssueNode): LinearIssue => ({
   state: { id: n.state.id, name: n.state.name, type: n.state.type },
   labels: (n.labels?.nodes ?? []).map((l) => l.name),
   parentId: n.parent?.id ?? null,
+  hasChildren: (n.children?.nodes.length ?? 0) > 0,
   blockedBy: (n.inverseRelations?.nodes ?? [])
     .filter((r) => r.type === 'blocks' && !DONE_STATE_TYPES.has(r.issue.state?.type ?? ''))
     .map((r) => r.issue.id),
@@ -337,16 +342,117 @@ export class LinearClient {
   }
 
   async setState(issueId: string, stateId: string): Promise<void> {
-    // VERIFY: IssueUpdate's `id` variable type (String! assumed) accepts "ENG-12" per the brief.
+    await this.updateIssue(issueId, { stateId })
+  }
+
+  /** `issueUpdate` with any IssueUpdateInput fields (state, description, …); `id` may be "ENG-12". */
+  async updateIssue(issueId: string, input: Record<string, unknown>): Promise<void> {
     const data = await this.query(
-      `mutation SetState($id: String!, $input: IssueUpdateInput!) {
+      `mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
         issueUpdate(id: $id, input: $input) { success }
       }`,
-      { id: issueId, input: { stateId } },
+      { id: issueId, input },
       z.looseObject({ issueUpdate: z.looseObject({ success: z.boolean() }) }),
     )
     if (!data.issueUpdate.success)
       throw new LinearError('graphql', `issueUpdate failed for ${issueId}`)
+  }
+
+  async createIssue(input: {
+    teamId: string
+    title: string
+    description: string
+    stateId?: string
+    parentId?: string
+    labelIds?: string[]
+    priority?: number
+  }): Promise<{ id: string; identifier: string; url: string }> {
+    const data = await this.query(
+      `mutation CreateIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) { success issue { id identifier url } }
+      }`,
+      { input },
+      z.looseObject({
+        issueCreate: z.looseObject({
+          success: z.boolean(),
+          issue: z
+            .looseObject({ id: z.string(), identifier: z.string(), url: z.string() })
+            .nullish(),
+        }),
+      }),
+    )
+    const out = data.issueCreate
+    if (!out.success || !out.issue)
+      throw new LinearError('graphql', `issueCreate failed for "${input.title}"`)
+    return { id: out.issue.id, identifier: out.issue.identifier, url: out.issue.url }
+  }
+
+  /** `issueId` blocks `relatedIssueId` (type `blocks`), or the two are related. */
+  async createRelation(input: {
+    issueId: string
+    relatedIssueId: string
+    type: 'blocks' | 'related'
+  }): Promise<void> {
+    const data = await this.query(
+      `mutation CreateRelation($input: IssueRelationCreateInput!) {
+        issueRelationCreate(input: $input) { success }
+      }`,
+      { input },
+      z.looseObject({ issueRelationCreate: z.looseObject({ success: z.boolean() }) }),
+    )
+    if (!data.issueRelationCreate.success)
+      throw new LinearError('graphql', `issueRelationCreate failed for ${input.relatedIssueId}`)
+  }
+
+  /**
+   * The id of a label usable on the team (a workspace label or the team's own), created on the
+   * team when missing. Null when it is missing and this identity may not create labels (the
+   * OAuth app may not).
+   */
+  async labelId(teamId: string, name: string): Promise<string | null> {
+    const data = await this.query(
+      `query Labels($name: String!) {
+        issueLabels(filter: { name: { eqIgnoreCase: $name } }, first: 50) {
+          nodes { id name team { id } }
+        }
+      }`,
+      { name },
+      z.looseObject({
+        issueLabels: z.looseObject({
+          nodes: z.array(
+            z.looseObject({
+              id: z.string(),
+              name: z.string(),
+              team: z.looseObject({ id: z.string() }).nullish(),
+            }),
+          ),
+        }),
+      }),
+    )
+    const usable = data.issueLabels.nodes.filter((l) => !l.team || l.team.id === teamId)
+    const found = usable.find((l) => l.team?.id === teamId) ?? usable[0]
+    if (found) return found.id
+    let created
+    try {
+      created = await this.query(
+        `mutation CreateLabel($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) { success issueLabel { id } }
+      }`,
+        { input: { name, teamId } },
+        z.looseObject({
+          issueLabelCreate: z.looseObject({
+            success: z.boolean(),
+            issueLabel: z.looseObject({ id: z.string() }).nullish(),
+          }),
+        }),
+      )
+    } catch (e) {
+      if (e instanceof LinearError && /not allowed/i.test(e.message)) return null
+      throw e
+    }
+    if (!created.issueLabelCreate.success || !created.issueLabelCreate.issueLabel)
+      throw new LinearError('graphql', `issueLabelCreate failed for "${name}"`)
+    return created.issueLabelCreate.issueLabel.id
   }
 
   async createComment(input: {

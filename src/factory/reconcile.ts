@@ -223,7 +223,7 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           { kind: 'set_phase', phase: 'closed' },
           { kind: 'event', name: 'closed', detail: 'before start' },
         ]
-      if (f.linearKey !== 'ready') return []
+      if (f.linearKey !== 'ready' || row.kind !== 'build') return []
       if (f.vmUp === null)
         return [
           ...needsInput(

@@ -1,6 +1,6 @@
 ---
 name: oar
-description: Hand a task to Claude Code on this repo's boat.dev VM (engine = nodes-engine, cno = nodes-cno) with the `oar` CLI and track it to a draft PR. Use when the user says "hand off", "run on the VM", "overnight", "on boat", "dispatch", "/oar", or asks how a handed-off task is going.
+description: Hand a task to Claude Code on this repo's boat.dev VM (engine = nodes-engine, cno = nodes-cno) with the `oar` CLI and track it to a draft PR, or turn an approved plan into Linear tickets for the factory with `oar ticket`. Use when the user says "hand off", "run on the VM", "overnight", "on boat", "dispatch", "/oar", "plan this for the factory", "write tickets", "put this in Linear", or asks how a handed-off task or factory issue is going.
 ---
 
 # oar: hand a task to the VM
@@ -44,6 +44,14 @@ automated reviewer checks the PR; P0/P1 findings go back to the agent, a clean r
 A `hold` label on the issue stops the merge. Questions from the agent arrive as comments on the
 issue; replies there go back to the agent. `oar factory attach ENG-12` opens the agent's pane.
 Do not also `oar task dispatch` the same work: the two would share one VM screen.
+
+## Planning work for the factory
+
+When the user plans a change with you (usually in plan mode) and wants the factory to build it,
+follow [tickets.md](tickets.md): shape the plan as tickets, and after approval write the plan
+file, run `oar ticket check <file>`, then `oar ticket create <file>`. The tickets land in
+Backlog, each with Goal, Jobs to be done, Functional and Non-functional criteria, Scope,
+Decisions and a Staging check; the user moves them to Todo.
 
 ## Commands
 
