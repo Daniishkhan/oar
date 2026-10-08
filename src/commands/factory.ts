@@ -610,6 +610,35 @@ export async function factoryDoctor(ctx: Ctx): Promise<boolean> {
       ? 'logged in'
       : 'not logged in: PR polling falls back to the worker VMs (set GH_TOKEN in ~/.config/oar/env)',
   )
+  // GitHub resolves a workflow by file name on the repo's default branch: one that exists only
+  // on the integration branch cannot be dispatched or found, however green it is there.
+  for (const [name, repo] of Object.entries(ctx.config.repos)) {
+    const workflows = [
+      ['deployWorkflow', repo.deployWorkflow],
+      ['verifyWorkflow', repo.verifyWorkflow],
+    ] as const
+    for (const [field, file] of workflows) {
+      if (!file) continue
+      const r = await ctx.exec.run(
+        'gh',
+        [
+          'api',
+          `repos/${repo.github}/actions/workflows/${encodeURIComponent(file)}`,
+          '--jq',
+          '.state',
+        ],
+        { timeoutMs: 20_000 },
+      )
+      const state = r.stdout.trim()
+      push(
+        `${name}: ${field} ${file}`,
+        r.code === 0 && state === 'active',
+        r.code === 0
+          ? state
+          : `not registered: put ${file} on the default branch of ${repo.github}`,
+      )
+    }
+  }
   const self = ctx.config.factory.controller.sandboxId
   if (self) {
     const sb = await ctx.boat.get(self).catch(() => null)

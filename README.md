@@ -274,6 +274,10 @@ provisioning each token. [GitHub token management](https://docs.github.com/en/au
 package manager, Playwright project, and staging URLs to the application; this CLI project does
 not install browser-test dependencies or supply application acceptance tests.
 
+GitHub resolves a `workflow_dispatch` target by file name on the repository's default branch, so
+the verification workflow must exist there as well as on `baseBranch`; the version that runs is
+the one on the dispatched `baseBranch`. `oar factory doctor` reports each configured workflow
+that GitHub has not registered.
 The controller dispatches verification only after `deployWorkflow` succeeds for the merged SHA.
 The verification workflow accepts `expected_sha` and `oar_run_id`; preserve the run-name marker
 `[oar:${{ inputs.oar_run_id }}]` so the controller can correlate the attempt. GitHub dispatch uses
