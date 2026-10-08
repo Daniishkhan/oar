@@ -9,7 +9,7 @@ import type {
   SshKeyResponse,
   UpdateSandboxRequest,
 } from '@boatdev/sdk'
-import type { BoatClient, CommandResult, DesktopInfo } from '../../src/boat.js'
+import type { BoatClient, CommandResult, DesktopInfo, EnvironmentInfo } from '../../src/boat.js'
 
 export interface FakeBoatOptions {
   now?: () => number
@@ -31,6 +31,17 @@ const base = (id: string, over: Partial<Sandbox> = {}): Sandbox =>
   }) as Sandbox
 
 export class FakeBoat implements BoatClient {
+  environmentList: EnvironmentInfo[] = ['engine', 'cno', 'review-only'].map((name) => ({
+    id: `env-${name}`,
+    name,
+    latestVersionId: `env-${name}-v1`,
+    latestVersionNumber: 1,
+    safeForThirdParties: false,
+    passGithub: name !== 'review-only',
+    passSecrets: true,
+    passSandboxCredentials: name !== 'review-only',
+    passAgentsCredentials: true,
+  }))
   sandboxes = new Map<string, Sandbox>()
   files = new Map<string, string>()
   commands: Array<{ id: string; req: CommandRequest }> = []
@@ -52,7 +63,8 @@ export class FakeBoat implements BoatClient {
   }
 
   add(id: string, over: Partial<Sandbox> = {}): Sandbox {
-    const s = base(id, over)
+    const env = this.environmentList.find((e) => e.name === over.environment)
+    const s = base(id, { ...(env ? { environmentVersion: env.latestVersionNumber } : {}), ...over })
     this.sandboxes.set(id, s)
     return s
   }
@@ -211,9 +223,6 @@ export class FakeBoat implements BoatClient {
   }
 
   async environments() {
-    return [
-      { id: 'env-engine', name: 'engine' },
-      { id: 'env-cno', name: 'cno' },
-    ]
+    return this.environmentList.map((environment) => ({ ...environment }))
   }
 }

@@ -2,7 +2,7 @@
   "name": "oar",
   "version": "0.1.0",
   "private": true,
-  "description": "Remote coding on boat.dev: one VM per repo, Herdr on the VM, Claude Code tasks tracked to draft PRs.",
+  "description": "Remote Claude and Codex coding on boat.dev, from repository plans and Linear tasks to verified staging delivery.",
   "type": "module",
   "bin": {
     "oar": "dist/oar.mjs"
@@ -20,7 +20,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "verify": "pnpm typecheck && pnpm format:check && pnpm lint && pnpm test",
-    "install:local": "pnpm build && mkdir -p ~/.local/bin ~/.claude/skills/oar && ln -sf \"$PWD/dist/oar.mjs\" ~/.local/bin/oar && cp skill/*.md ~/.claude/skills/oar/"
+    "install:local": "pnpm build && node scripts/install-local.mjs"
   },
   "dependencies": {
     "@boatdev/sdk": "^1.5.0",

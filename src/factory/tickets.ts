@@ -39,15 +39,32 @@ const Created = z.object({
   planListed: z.boolean().default(false),
 })
 
+/** Saved before any remote writes. UUIDs are also Linear's entity IDs, making retries safe. */
+const Publication = z.object({
+  version: z.literal(1),
+  id: z.uuid(),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  startedAt: z.iso.datetime(),
+  operations: z.object({
+    // Existing publications can be adopted using their original Linear IDs.
+    plan: z.string().optional(),
+    tickets: z.record(z.string(), z.string()),
+    relations: z.record(z.string(), z.string()),
+  }),
+})
+
 export const PlanFileSchema = z
   .object({
     /** Linear team key, e.g. CNO. */
     team: z.string().regex(/^[A-Z][A-Z0-9]*$/, 'a Linear team key such as CNO'),
     /** The parent issue holding the whole plan; required when there is more than one ticket. */
     plan: z.object({ title: text.max(120), summary: text }).optional(),
+    /** Markdown plan, relative to this JSON file; its full contents are published inline. */
+    document: text.optional(),
     tickets: z.array(TicketSchema).min(1),
     /** Written by `oar ticket create`: what already exists in Linear, so a re-run resumes. */
     created: Created.default(() => ({ tickets: {}, relations: [], planListed: false })),
+    publication: Publication.optional(),
   })
   .superRefine((p, ctx) => {
     const keys = new Set<string>()
@@ -107,13 +124,33 @@ export interface IssueRef {
   title: string
 }
 
+export interface PublicationContext {
+  id: string
+  contentHash: string
+  sourceFile: string
+  document?: { path: string; content: string }
+  taskKey?: string
+}
+
+/** Included in the issue body, so workers can read the pinned draft even before it is pushed. */
+function renderPublication(p: PublicationContext): string {
+  return [
+    '## Published source',
+    '',
+    `Publication: \`${p.id}\`${p.taskKey ? ` · Task: \`${p.taskKey}\`` : ''}`,
+    `Snapshot SHA-256: \`${p.contentHash}\``,
+    `Source: \`${p.sourceFile}\`${p.document ? ` and \`${p.document.path}\`` : ''}. This identifies the published contents, not a Git commit.`,
+    ...(p.document ? ['', '## Published plan snapshot', '', p.document.content.trim()] : []),
+  ].join('\n')
+}
+
 const bullets = (items: string[], box = false) =>
   items.map((i) => `- ${box ? '[ ] ' : ''}${i}`).join('\n')
 
 /** One ticket's Linear description, always in the same sections and order. */
 export function renderTicket(
   t: Ticket,
-  o: { deps?: IssueRef[]; plan?: IssueRef | null } = {},
+  o: { deps?: IssueRef[]; plan?: IssueRef | null; publication?: PublicationContext } = {},
 ): string {
   const parts = [
     `## Goal\n\n${t.goal}`,
@@ -131,6 +168,7 @@ export function renderTicket(
   if (o.deps?.length)
     parts.push(`## Depends on\n\n${bullets(o.deps.map((d) => `${d.identifier} ${d.title}`))}`)
   if (o.plan) parts.push(`---\n\nPart of ${o.plan.identifier}: ${o.plan.title}.`)
+  if (o.publication) parts.push(renderPublication(o.publication))
   return `${parts.join('\n\n')}\n`
 }
 
@@ -138,6 +176,7 @@ export function renderTicket(
 export function renderPlan(
   plan: { title: string; summary: string },
   tickets: Array<IssueRef & { after: string[] }>,
+  publication?: PublicationContext,
 ): string {
   const parts = [plan.summary]
   if (tickets.length)
@@ -152,6 +191,7 @@ export function renderPlan(
   parts.push(
     `---\n\nThis is a plan issue (label \`${SPEC_LABEL}\`): the factory never builds it. Move its tickets to Todo; a ticket waits until the tickets it depends on are done.`,
   )
+  if (publication) parts.push(renderPublication(publication))
   return `${parts.join('\n\n')}\n`
 }
 

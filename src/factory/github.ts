@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { BoatClient } from '../boat.js'
 import type { RepoConfig } from '../config.js'
 import type { Exec } from '../exec.js'
 import { ghJson } from '../github.js'
-import type { ReviewComment } from './types.js'
+import type { ReviewComment, WorkflowSnapshot } from './types.js'
 
 /** `gh api …` for one repo, run here first and on the worker VM when that fails. */
 export class GhFeed {
@@ -40,22 +41,33 @@ const IssueComment = z.looseObject({
   line: z.number().nullable().optional(),
   original_line: z.number().nullable().optional(),
 })
-const CheckRuns = z.looseObject({
-  check_runs: z.array(
-    z.looseObject({
-      name: z.string(),
-      status: z.string(),
-      conclusion: z.string().nullable().default(null),
-    }),
-  ),
+const CheckRun = z.looseObject({
+  id: z.number(),
+  name: z.string(),
+  head_sha: z.string(),
+  app: z.looseObject({ id: z.number() }).optional(),
+  status: z.string(),
+  conclusion: z.string().nullable().default(null),
+})
+const CheckRuns = z.looseObject({ check_runs: z.array(CheckRun) })
+const CommitStatus = z.looseObject({
+  id: z.number(),
+  context: z.string(),
+  state: z.string(),
 })
 const WorkflowRuns = z.looseObject({
   workflow_runs: z.array(
     z.looseObject({
+      id: z.number(),
+      run_attempt: z.number().default(1),
       status: z.string(),
       conclusion: z.string().nullable().default(null),
       html_url: z.string().default(''),
-      head_sha: z.string().default(''),
+      head_sha: z.string(),
+      head_branch: z.string(),
+      display_title: z.string().default(''),
+      run_started_at: z.string().nullable().default(null),
+      updated_at: z.string().nullable().default(null),
     }),
   ),
 })
@@ -151,45 +163,121 @@ export async function reviewFeed(
 export interface CheckSummary {
   headSha: string
   failed: string[]
+  missing: string[]
   pending: boolean
   passed: boolean
+  checks: Array<{ name: string; state: string; source: 'check' | 'status' }>
 }
 
+/** Fetch every page, including legacy status contexts. Any failed read blocks the gate. */
 export async function checkRuns(gh: GhFeed, sha: string): Promise<CheckSummary | null> {
   const [o, r] = gh.repo.github.split('/')
-  const json = await gh.api(`repos/${o}/${r}/commits/${sha}/check-runs?per_page=100`)
-  const p = CheckRuns.safeParse(json)
-  if (!p.success) return null
-  const runs = p.data.check_runs
-  // A cancelled run (a job timeout, a superseded push) says nothing about the change itself and
-  // is a human's rerun to make, not a round for the agent.
-  const failed = runs
-    .filter(
-      (c) => c.status === 'completed' && ['failure', 'timed_out'].includes(c.conclusion ?? ''),
-    )
-    .map((c) => c.name)
-  const pending = runs.some((c) => c.status !== 'completed')
-  return { headSha: sha, failed, pending, passed: runs.length > 0 && !pending && !failed.length }
+  const [runJson, statusJson] = await Promise.all([
+    gh.api(`repos/${o}/${r}/commits/${sha}/check-runs?filter=latest&per_page=100`, true),
+    gh.api(`repos/${o}/${r}/commits/${sha}/statuses?per_page=100`, true),
+  ])
+  if (runJson === null || !Array.isArray(statusJson)) return null
+  const runPages = z.array(CheckRuns).safeParse(Array.isArray(runJson) ? runJson : [runJson])
+  const statuses = z.array(CommitStatus).safeParse(flatten(statusJson))
+  if (!runPages.success || !statuses.success) return null
+  const runs = runPages.data.flatMap((page) => page.check_runs)
+  if (runs.some((run) => run.head_sha !== sha)) return null
+  // GitHub returns status history, so retain the newest entry per context; likewise rerun checks.
+  const latestRuns = new Map<string, z.infer<typeof CheckRun>>()
+  for (const run of runs) {
+    const key = `${run.app?.id ?? 'unknown'}:${run.name}`
+    if (!latestRuns.has(key) || latestRuns.get(key)!.id < run.id) latestRuns.set(key, run)
+  }
+  const latestStatuses = new Map<string, z.infer<typeof CommitStatus>>()
+  for (const status of statuses.data) {
+    if (!latestStatuses.has(status.context) || latestStatuses.get(status.context)!.id < status.id)
+      latestStatuses.set(status.context, status)
+  }
+  const checks: CheckSummary['checks'] = [
+    ...[...latestRuns.values()].map((run) => ({
+      name: run.name,
+      state: run.status === 'completed' ? (run.conclusion ?? 'unknown') : 'pending',
+      source: 'check' as const,
+    })),
+    ...[...latestStatuses.values()].map((status) => ({
+      name: status.context,
+      state: status.state,
+      source: 'status' as const,
+    })),
+  ]
+  const required = gh.repo.requiredChecks
+  const selected = required.length
+    ? checks.filter((check) => required.includes(check.name))
+    : checks
+  const missing = required.filter((name) => !checks.some((check) => check.name === name))
+  const failed = [
+    ...new Set(
+      selected.filter((c) => !['success', 'pending'].includes(c.state)).map((c) => c.name),
+    ),
+  ]
+  const pending = missing.length > 0 || selected.some((c) => c.state === 'pending')
+  return {
+    headSha: sha,
+    failed,
+    missing,
+    pending,
+    passed: selected.length > 0 && !pending && !failed.length,
+    checks,
+  }
 }
 
-export interface RunSummary {
-  status: string
-  conclusion: string | null
-  url: string
-}
+export type RunSummary = WorkflowSnapshot
 
-/** The deploy workflow's run for a merge commit on the base branch, if it has started. */
+/** Latest run for this exact merged revision and branch; never trust the server filter alone. */
 export async function workflowRun(
   gh: GhFeed,
   workflowFile: string,
   sha: string,
   branch: string,
+  requestKey?: string,
 ): Promise<RunSummary | null> {
   const [o, r] = gh.repo.github.split('/')
   const json = await gh.api(
-    `repos/${o}/${r}/actions/workflows/${workflowFile}/runs?head_sha=${sha}&branch=${encodeURIComponent(branch)}&per_page=5`,
+    `repos/${o}/${r}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?head_sha=${sha}&branch=${encodeURIComponent(branch)}&per_page=100`,
+    true,
   )
-  const p = WorkflowRuns.safeParse(json)
-  const run = p.success ? p.data.workflow_runs[0] : undefined
-  return run ? { status: run.status, conclusion: run.conclusion, url: run.html_url } : null
+  if (json === null) return null
+  const p = z.array(WorkflowRuns).safeParse(Array.isArray(json) ? json : [json])
+  if (!p.success) return null
+  const run = p.data
+    .flatMap((page) => page.workflow_runs)
+    .filter(
+      (candidate) =>
+        candidate.head_sha === sha &&
+        candidate.head_branch === branch &&
+        (!requestKey || candidate.display_title.includes(`[oar:${requestKey}]`)),
+    )
+    .sort((a, b) => b.id - a.id || b.run_attempt - a.run_attempt)[0]
+  return run
+    ? {
+        headSha: run.head_sha,
+        status: run.status,
+        conclusion: run.conclusion,
+        url: run.html_url,
+        runId: run.id,
+        attempt: run.run_attempt,
+        startedAt: run.run_started_at,
+        completedAt: run.status === 'completed' ? run.updated_at : null,
+        runName: run.display_title,
+      }
+    : null
+}
+
+/** Stable within one delivery attempt; a human retry opens a fresh attempt window. */
+export function verificationRequestKey(
+  issueId: string,
+  sha: string,
+  deploymentRunId: number,
+  deploymentAttempt: number,
+  startedAt: string | null,
+): string {
+  return `oar-verify-${createHash('sha256')
+    .update(JSON.stringify([issueId, sha, deploymentRunId, deploymentAttempt, startedAt]))
+    .digest('hex')
+    .slice(0, 24)}`
 }

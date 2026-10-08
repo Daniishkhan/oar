@@ -1,14 +1,17 @@
 import { runCommand } from './boat.js'
+import { agentArguments, type CodingAgent } from './agents.js'
 import { footer, readBrief, vmBriefPath, vmTaskDir, type FooterOptions } from './brief.js'
 import type { RepoConfig } from './config.js'
 import type { Ctx } from './context.js'
 import { OarError } from './errors.js'
 import { shq } from './exec.js'
 import { Created, HerdrError, HerdrMachine, type AgentInfo } from './herdr.js'
-import type { AgentStatus, Task, VmRecord } from './state.js'
+import { mutateState, type AgentStatus, type Task, type VmRecord } from './state.js'
 
 export interface HerdrHandle {
   runner: 'herdr'
+  agentKind?: CodingAgent
+  agentModel?: string
   workspaceId: string
   tabId?: string
   paneId: string
@@ -26,6 +29,17 @@ export interface DispatchResult {
   handle: HerdrHandle
   /** Set when the prompt was sent but Herdr never saw the agent start working. */
   note?: string
+}
+
+/** Legacy saved handles belong to the former Claude-only runner. */
+export function taskAgentIdentity(
+  task: Task,
+  repo: RepoConfig,
+): { kind: CodingAgent; model?: string } {
+  if (task.agentKind) return { kind: task.agentKind, model: task.agentModel }
+  if (task.handle?.runner === 'herdr')
+    return { kind: task.handle.agentKind ?? 'claude', model: task.handle.agentModel }
+  return { kind: repo.buildRunner, model: repo.buildModel }
 }
 
 const TRUST_DIALOG = /trust|yes, proceed|bypass permissions|dangerous|press enter|continue\?/i
@@ -69,7 +83,7 @@ async function settleDialogs(
       if (!info || info.agent_status === 'working') return
       throw new OarError(
         'blocked',
-        `Claude is at a dialog oar does not know in ${target}:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
+        `Agent is at a dialog oar does not know in ${target}:\n${screen.trim().split('\n').slice(-12).join('\n')}`,
         `oar task keys ${taskId} <key>   or   oar task attach ${taskId}`,
       )
     }
@@ -81,7 +95,7 @@ async function settleDialogs(
   }
   throw new OarError(
     'blocked',
-    `Claude in ${target} is still not idle after answering its dialogs`,
+    `Agent in ${target} is still not idle after answering its dialogs`,
     `oar task attach ${taskId}`,
   )
 }
@@ -126,7 +140,7 @@ async function createWorktree(
   }
 }
 
-/** Runs interactive Claude in a Herdr pane on the VM, in its own worktree, and points it at the brief. */
+/** Runs the configured coding agent in its own worktree through the shared Herdr lifecycle. */
 export async function dispatchHerdr(
   ctx: Ctx,
   task: Task,
@@ -137,6 +151,23 @@ export async function dispatchHerdr(
   const { log } = opts
   const id = vm.sandboxId
   const machine = new HerdrMachine(ctx.exec, repo.herdrLabel)
+  const { kind, model } = taskAgentIdentity(task, repo)
+  const existing = (await machine.agents().catch(() => [] as AgentInfo[])).find(
+    (a) => a.name === task.id || a.cwd === task.worktreePath,
+  )
+  if (existing && !task.agentKind && task.handle?.runner !== 'herdr')
+    throw new OarError(
+      'state_invalid',
+      'an existing agent has no recorded provider identity',
+      'stop the existing agent before retrying this task',
+    )
+  // Persist intent before a launch whose response might be lost.
+  await mutateState(ctx.paths, (state) => {
+    const saved = state.tasks[task.id]
+    if (!saved) throw new OarError('no_task', `no task ${task.id}`)
+    saved.agentKind = kind
+    saved.agentModel = model
+  })
 
   // 1. pre-flight on the VM: fresh base, branch not already on origin
   const fetch = await runCommand(ctx.boat, id, `git fetch origin ${shq(repo.baseBranch)}`, {
@@ -170,9 +201,6 @@ export async function dispatchHerdr(
   log(`brief written to ${vmBriefPath(task.id)}`)
 
   // 3. a pane from an earlier attempt is reused; otherwise worktree + workspace in Herdr
-  const existing = (await machine.agents().catch(() => [] as AgentInfo[])).find(
-    (a) => a.name === task.id || a.cwd === task.worktreePath,
-  )
   let created: Created
   let paneId: string
   if (existing) {
@@ -206,7 +234,8 @@ export async function dispatchHerdr(
     }
 
     // 5. no trust dialog for the new cwd
-    await runCommand(ctx.boat, id, trustScript(task.worktreePath), { timeoutSeconds: 60 })
+    if (kind === 'claude')
+      await runCommand(ctx.boat, id, trustScript(task.worktreePath), { timeoutSeconds: 60 })
   }
 
   // 6-7. start Claude with a unique name, unless it is already in the pane
@@ -217,16 +246,13 @@ export async function dispatchHerdr(
       'start',
       name,
       '--kind',
-      'claude',
+      kind,
       '--pane',
       paneId,
       '--timeout',
       '90000',
       '--',
-      '--name',
-      name,
-      '--remote-control',
-      name,
+      ...agentArguments(kind, { name, taskId: task.id, cwd: task.worktreePath, model }),
     ]
     try {
       await machine.call(startArgs, undefined, 120_000)
@@ -235,11 +261,11 @@ export async function dispatchHerdr(
         e instanceof HerdrError &&
         (e.code === 'agent_not_ready' || /timed out|timeout/i.test(`${e.code} ${e.message}`))
       if (!notReady) throw e
-      log(`claude started but is not ready yet (${(e as HerdrError).code}); checking its screen`)
+      log(`${kind} started but is not ready yet (${(e as HerdrError).code}); checking its screen`)
     }
   }
   await settleDialogs(machine, name, task.id, log)
-  log(`claude running as agent ${name}`)
+  log(`${kind} running as agent ${name}`)
   // The TUI drops input while it re-renders after a dialog; give it a moment before the prompt.
   await new Promise((r) => setTimeout(r, existing ? 3_000 : 1_500))
 
@@ -257,6 +283,8 @@ export async function dispatchHerdr(
   return {
     handle: {
       runner: 'herdr',
+      agentKind: kind,
+      ...(model ? { agentModel: model } : {}),
       workspaceId: created.workspace.workspace_id,
       tabId: created.tab?.tab_id,
       paneId,
@@ -464,9 +492,12 @@ export async function resumeHerdr(
     120_000,
   )
   const paneId = opened.root_pane.pane_id
-  await runCommand(ctx.boat, sandboxId, trustScript(task.worktreePath), {
-    timeoutSeconds: 60,
-  }).catch(() => undefined)
+  // Existing handles without provider metadata were created by the Claude-only runner.
+  const kind = handle.agentKind ?? 'claude'
+  if (kind === 'claude')
+    await runCommand(ctx.boat, sandboxId, trustScript(task.worktreePath), {
+      timeoutSeconds: 60,
+    }).catch(() => undefined)
   const name = await uniqueAgentName(machine, handle.agentName, paneId)
   await machine.call(
     [
@@ -474,17 +505,19 @@ export async function resumeHerdr(
       'start',
       name,
       '--kind',
-      'claude',
+      kind,
       '--pane',
       paneId,
       '--timeout',
       '90000',
       '--',
-      '--continue',
-      '--name',
-      name,
-      '--remote-control',
-      name,
+      ...agentArguments(kind, {
+        name,
+        taskId: task.id,
+        cwd: task.worktreePath,
+        resume: true,
+        model: handle.agentModel,
+      }),
     ],
     undefined,
     120_000,

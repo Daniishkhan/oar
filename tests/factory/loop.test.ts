@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { taskIdentity } from '../../src/factory/apply.js'
 import { vmDoneMarker } from '../../src/brief.js'
 import { questionPath, reviewPath } from '../../src/factory/brief.js'
@@ -11,8 +11,9 @@ import type {
   LinearState,
 } from '../../src/factory/linear.js'
 import { Factory } from '../../src/factory/loop.js'
+import { LinearError } from '../../src/factory/linear.js'
 import { ConfigSchema, DEFAULT_CONFIG } from '../../src/config.js'
-import { loadState } from '../../src/state.js'
+import { loadState, mutateState } from '../../src/state.js'
 import { world } from '../helpers.js'
 
 const T0 = '2026-10-07T19:00:00.000Z'
@@ -149,10 +150,16 @@ function worker(w: ReturnType<typeof world>) {
     .on('gh pr comment', { code: 0, stdout: 'https://github.com/o/r/pull/7#issuecomment-1' })
     .on('gh pr ready', { code: 0 })
     .on('gh pr merge', () => ({ code: merge.code, stdout: '', stderr: merge.stderr }))
-    .on(/^gh api repos\/\S+\/commits\/\S+\/check-runs/, () => ({
+    .on(/^gh api (?:--paginate --slurp )?repos\/\S+\/commits\/\S+\/check-runs/, () => ({
       code: 0,
       stderr: '',
-      stdout: checks.json,
+      stdout: JSON.stringify([
+        {
+          check_runs: (
+            JSON.parse(checks.json) as { check_runs: Array<Record<string, unknown>> }
+          ).check_runs.map((check, index) => ({ id: index + 1, head_sha: 'abc', ...check })),
+        },
+      ]),
     }))
     .on('gh api', { code: 0, stdout: '[]' })
   return { agent, pr, checks, merge, prompts }
@@ -161,11 +168,18 @@ function worker(w: ReturnType<typeof world>) {
 function setup() {
   const config = ConfigSchema.parse({
     ...DEFAULT_CONFIG,
-    repos: { engine: { ...DEFAULT_CONFIG.repos.engine!, worktreeInit: [] } },
+    repos: {
+      engine: {
+        ...DEFAULT_CONFIG.repos.engine!,
+        worktreeInit: [],
+        deliveryMode: 'merge',
+        requiredChecks: [],
+      },
+    },
     factory: {
       ...DEFAULT_CONFIG.factory,
       // ≤ 10 minutes keeps runCommand synchronous (the detached path polls every 3 s)
-      review: { ...DEFAULT_CONFIG.factory.review, timeoutMinutes: 5 },
+      review: { ...DEFAULT_CONFIG.factory.review, timeoutMinutes: 5, isolation: 'worktree' },
       role: 'controller',
       linear: { ...DEFAULT_CONFIG.factory.linear, teams: { ENG: 'engine' }, mention: '@danish' },
     },
@@ -190,6 +204,174 @@ const tick = async (f: Factory) => {
 }
 
 describe('Factory end to end (fakes)', () => {
+  it('enforces budgets during a tracker outage, retries notification, and grants an explicit PR retry a new budget', async () => {
+    const { w, linear, db, f, pr } = setup()
+    let now = w.ctx.now()
+    w.ctx.now = () => now
+    linear.issues.push(issue())
+    await tick(f)
+    const row = db.issueByIdentifier('ENG-1')!
+    await mutateState(w.ctx.paths, (state) => {
+      state.tasks[row.taskId!]!.hours = 1
+    })
+    db.updateIssue(row.id, { prNumber: 7, prUrl: 'https://github.com/o/r/pull/7' })
+    now += 3_600_001
+    const sync = vi.spyOn(linear, 'issuesUpdatedSince').mockRejectedValue(new Error('tracker down'))
+    const comments = vi.spyOn(linear, 'createComment').mockRejectedValue(new Error('tracker down'))
+    const states = vi.spyOn(linear, 'setState').mockRejectedValue(new Error('tracker down'))
+    await tick(f)
+    expect(db.issue(row.id)?.phase).toBe('failed')
+    expect(loadState(w.ctx.paths).tasks[row.taskId!]?.status).toBe('closed')
+    expect(db.pendingOwnComments()).toHaveLength(1)
+    expect(w.exec.lines().some((line) => line.includes('pane close'))).toBe(true)
+    sync.mockRestore()
+    comments.mockRestore()
+    states.mockRestore()
+    await tick(f)
+    expect(db.issue(row.id)?.linearState).toBe('Needs Input')
+    expect(db.pendingOwnComments()).toEqual([])
+    expect(linear.lastComment()).toContain('execution budget')
+    now += 1000
+    linear.issues[0]!.state = { id: 'st-Ready', name: 'Ready', type: 'unstarted' }
+    linear.issues[0]!.updatedAt = new Date(now).toISOString()
+    pr.json = JSON.stringify([
+      {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: true,
+        headRefOid: 'abc',
+        mergeCommit: null,
+      },
+    ])
+    await tick(f)
+    expect(db.issue(row.id)?.phase).toBe('building')
+    expect(db.issue(row.id)?.roundStartedAt).toBe(new Date(now).toISOString())
+    now += 60_000
+    await tick(f)
+    expect(db.issue(row.id)?.phase).toBe('building')
+  })
+
+  it('waits for an active resume until the job limit, then rejects its late completion', async () => {
+    const { w, linear, db, f } = setup()
+    let now = w.ctx.now()
+    w.ctx.now = () => now
+    linear.issues.push(issue())
+    await tick(f)
+    const row = db.issueByIdentifier('ENG-1')!
+    await mutateState(w.ctx.paths, (state) => {
+      state.tasks[row.taskId!]!.hours = 0.01
+    })
+    now += 60_000
+    db.updateIssue(row.id, { phase: 'resuming', jobStartedAt: new Date(now).toISOString() })
+    let release!: () => void
+    let entered!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const exec = w.exec.run.bind(w.exec)
+    vi.spyOn(w.exec, 'run').mockImplementation(async (cmd, args, opts) => {
+      if (cmd === 'herdr' && args.includes('prompt')) {
+        entered()
+        await pending
+      }
+      return exec(cmd, args, opts)
+    })
+    await f.reconcileAll()
+    await started
+    await f.runTick()
+    expect(db.issue(row.id)?.phase).toBe('resuming')
+    now += (w.ctx.config.factory.jobTimeoutMinutes + 1) * 60_000
+    await f.runTick()
+    expect(db.issue(row.id)?.phase).toBe('failed')
+    release()
+    await f.jobs.drain()
+    expect(db.issue(row.id)?.phase).toBe('failed')
+    expect(loadState(w.ctx.paths).tasks[row.taskId!]?.status).toBe('closed')
+    expect(
+      db.evidence(row.id).some((e) => e.stage === 'deadline' && e.data.jobExpired === true),
+    ).toBe(true)
+  })
+
+  it('pins provider and model before launch and preserves them after an uncertain launch response', async () => {
+    const { w, linear, db, f } = setup()
+    w.ctx.config.repos.engine!.buildModel = 'original-model'
+    linear.issues.push(issue())
+    const exec = w.exec.run.bind(w.exec)
+    let loseResponse = true
+    vi.spyOn(w.exec, 'run').mockImplementation(async (cmd, args, opts) => {
+      const result = await exec(cmd, args, opts)
+      if (cmd === 'herdr' && args.includes('start') && loseResponse) {
+        loseResponse = false
+        const task = Object.values(loadState(w.ctx.paths).tasks)[0]!
+        expect(task).toMatchObject({ agentKind: 'claude', agentModel: 'original-model' })
+        throw new Error('launch response lost')
+      }
+      return result
+    })
+    await tick(f)
+    expect(db.issueByIdentifier('ENG-1')?.phase).toBe('failed')
+    w.ctx.config.repos.engine!.buildRunner = 'codex'
+    w.ctx.config.repos.engine!.buildModel = 'new-model'
+    linear.issues[0]!.state = { id: 'st-Ready', name: 'Ready', type: 'unstarted' }
+    await tick(f)
+    const row = db.issueByIdentifier('ENG-1')!
+    expect(row.phase).toBe('building')
+    expect(loadState(w.ctx.paths).tasks[row.taskId!]?.handle).toMatchObject({
+      agentKind: 'claude',
+      agentModel: 'original-model',
+    })
+    expect(
+      db
+        .evidence(row.id)
+        .filter((e) => e.stage === 'input')
+        .at(-1)?.data,
+    ).toMatchObject({ runner: 'claude', model: 'original-model' })
+    expect(w.exec.lines().filter((line) => line.includes('agent start'))).toHaveLength(1)
+  })
+
+  it('keeps observation and maintenance ticking through a Linear outage without dispatching stale work', async () => {
+    const { w, linear, db, f, agent, log } = setup()
+    linear.issues.push(issue())
+    linear.issuesUpdatedSince = async () => {
+      throw new LinearError('ratelimited', 'retry later', 429)
+    }
+    f.tick = 3
+    w.boat.add('bx_1', { state: 'running', archiveAfter: new Date(w.ctx.now() + 60_000) })
+    await tick(f)
+    expect(db.cursor('tick.n')).toBe('4')
+    expect(db.cursor('tick.at')).toBe(new Date(w.ctx.now()).toISOString())
+    expect(agent.name).toBe('')
+    expect(log.some((l) => l.includes('maintenance continue'))).toBe(true)
+    expect(db.events().some((e) => e.detail.includes('linear:'))).toBe(true)
+    await tick(f)
+    expect(db.cursor('tick.n')).toBe('5')
+  })
+
+  it('polls GitHub when its configured cadence equals the main tick interval', async () => {
+    const { w, linear, db, f, pr } = setup()
+    w.ctx.config.factory.githubPollSeconds = w.ctx.config.defaults.pollSeconds
+    linear.issues.push(issue())
+    await tick(f)
+    const row = db.issueByIdentifier('ENG-1')!
+    db.updateIssue(row.id, { phase: 'review' })
+    pr.json = JSON.stringify([
+      {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        state: 'OPEN',
+        isDraft: true,
+        headRefOid: 'abc',
+        mergeCommit: null,
+        updatedAt: T0,
+      },
+    ])
+    await tick(f)
+    expect(w.exec.calls.some((c) => c.args.some((arg) => arg.includes('/reviews')))).toBe(true)
+  })
   it('takes a Ready issue to a draft PR, a review and a merge', async () => {
     const { w, linear, db, f, log, agent, pr, prompts } = setup()
     linear.issues.push(issue())

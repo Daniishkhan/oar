@@ -6,9 +6,27 @@ import { agentState, readAgent, type LiveAgent } from '../runner.js'
 import { loadState, type Task } from '../state.js'
 import { cleanTail, questionPath } from './brief.js'
 import type { FactoryDb } from './db.js'
-import { checkRuns, GhFeed, reviewFeed, workflowRun } from './github.js'
+import { checkRuns, GhFeed, reviewFeed, verificationRequestKey, workflowRun } from './github.js'
 import type { Jobs } from './jobs.js'
-import { SLOT_PHASES, type Facts, type IssueRow, type StateKey } from './types.js'
+import { DELIVERY_PHASES, SLOT_PHASES, type Facts, type IssueRow, type StateKey } from './types.js'
+
+/** True while another issue of the repo holds the base branch between merge and verified delivery. */
+export function deliveryBusy(
+  db: FactoryDb,
+  row: Pick<IssueRow, 'id' | 'repo'>,
+  mode: 'staging' | 'merge',
+): boolean {
+  if (mode !== 'staging') return false
+  return db
+    .allIssues()
+    .some(
+      (other) =>
+        other.id !== row.id &&
+        other.repo === row.repo &&
+        (DELIVERY_PHASES.has(other.phase) ||
+          (['review', 'needs_input'].includes(other.phase) && Boolean(other.mergeSha))),
+    )
+}
 
 export interface ObserveDeps {
   db: FactoryDb
@@ -40,10 +58,13 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
     review: { comments: [], changesRequested: false, cursor: row.reviewCursor },
     ci: null,
     staging: null,
+    verification: null,
+    verificationRequested: false,
     linearKey: deps.stateKeyOf(row.linearState, row.linearStateType),
     humanMoved: row.linearState !== row.lastSetState,
     nowIso,
     slotFree: deps.db.countInPhases(row.repo, SLOT_PHASES) < deps.concurrency(row.repo),
+    deliveryBusy: false,
     jobRunning: deps.jobs.has(row.id),
     jobAgeMs: row.jobStartedAt ? Math.max(0, ctx.now() - Date.parse(row.jobStartedAt)) : 0,
     blocked: row.blockedBy.some((id) => {
@@ -52,16 +73,47 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
     }),
     idleForMs: 0,
   }
+  const cfg = repoConfig(ctx.config, row.repo)
+  facts.deliveryBusy = deliveryBusy(deps.db, row, cfg.deliveryMode)
+  const sandboxId = deps.sandboxId(row.repo)
+  const gh = new GhFeed(ctx.exec, ctx.boat, sandboxId, cfg)
+  if (DELIVERY_PHASES.has(row.phase)) {
+    if (deps.githubDue && row.roundStartSha) {
+      const deployment = cfg.deployWorkflow
+        ? await workflowRun(gh, cfg.deployWorkflow, row.roundStartSha, cfg.baseBranch).catch(
+            () => null,
+          )
+        : null
+      facts.staging = deployment
+      if (deployment && cfg.verifyWorkflow) {
+        const requestKey = verificationRequestKey(
+          row.id,
+          row.roundStartSha,
+          deployment.runId,
+          deployment.attempt,
+          row.roundStartedAt,
+        )
+        facts.verificationRequested = deps.db
+          .evidence(row.id)
+          .some((e) => e.stage === 'verification-dispatch' && e.data.requestKey === requestKey)
+        if (facts.verificationRequested)
+          facts.verification = await workflowRun(
+            gh,
+            cfg.verifyWorkflow,
+            row.roundStartSha,
+            cfg.baseBranch,
+            requestKey,
+          ).catch(() => null)
+      }
+    }
+    return facts
+  }
   if (!row.taskId) return facts
   const task: Task | undefined = loadState(ctx.paths).tasks[row.taskId]
   if (!task) return facts
-  const cfg = repoConfig(ctx.config, row.repo)
-  const sandboxId = deps.sandboxId(row.repo)
-  const gh = new GhFeed(ctx.exec, ctx.boat, sandboxId, cfg)
 
   // The PR is cheap (one `gh pr list`) and decides merges, so it is read on every tick.
-  if (row.phase !== 'merged')
-    facts.pr = await prSnapshot(ctx.exec, ctx.boat, sandboxId, cfg, task.branch).catch(() => null)
+  facts.pr = await prSnapshot(ctx.exec, ctx.boat, sandboxId, cfg, task.branch).catch(() => null)
 
   if (vmState === 'down' || !sandboxId) {
     facts.agent = 'vm-down'
@@ -88,16 +140,7 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
   if (deps.githubDue && facts.pr && row.phase === 'review') {
     facts.review = await reviewFeed(gh, facts.pr.number, row.reviewCursor).catch(() => facts.review)
     const ci = await checkRuns(gh, facts.pr.headSha).catch(() => null)
-    if (ci)
-      facts.ci = { headSha: ci.headSha, failed: ci.failed, pending: ci.pending, passed: ci.passed }
-  }
-  if (deps.githubDue && row.phase === 'merged' && cfg.deployWorkflow && row.roundStartSha) {
-    const run = await workflowRun(gh, cfg.deployWorkflow, row.roundStartSha, cfg.baseBranch).catch(
-      () => null,
-    )
-    facts.staging = run
-      ? { conclusion: run.status === 'completed' ? run.conclusion : null, url: run.url }
-      : null
+    if (ci) facts.ci = ci
   }
   return facts
 }

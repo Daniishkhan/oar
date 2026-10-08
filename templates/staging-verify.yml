@@ -1,0 +1,96 @@
+# EXAMPLE ONLY: copy into the application's .github/workflows/staging-verify.yml and adapt it.
+# The controller dispatches this AFTER deployWorkflow succeeds for expected_sha.
+# Configure the SAME `concurrency.group: staging` in the deployment workflow.
+# Set repo.verifyWorkflow to this filename, distinct from repo.deployWorkflow.
+name: Verify staging
+run-name: 'Verify staging ${{ inputs.expected_sha }} [oar:${{ inputs.oar_run_id }}]'
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Full merged commit SHA already deployed to staging
+        required: true
+        type: string
+      oar_run_id:
+        description: Controller verification attempt identifier
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Create this environment with staging READ credentials only, and no manual gate
+    # if unattended verification is desired. Never reuse production/deployment secrets.
+    environment: staging-verification
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      WORKFLOW_SHA: ${{ github.sha }}
+      STAGING_VERSION_URL: ${{ vars.STAGING_VERSION_URL }}
+      PLAYWRIGHT_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+    steps:
+      - name: Require the dispatched workflow revision to match the deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'expected_sha must be a full commit SHA'; exit 1; }
+          [[ "$WORKFLOW_SHA" == "$EXPECTED_SHA" ]] || { echo 'Base branch advanced before verification dispatch; refusing to verify another revision'; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+
+      - name: Confirm checkout revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Confirm deployed revision
+        shell: bash
+        env:
+          STAGING_READ_TOKEN: ${{ secrets.STAGING_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGING_VERSION_URL" == https://* ]] || { echo 'Set STAGING_VERSION_URL to the app version endpoint'; exit 1; }
+          args=(--fail --silent --show-error --max-time 30 -H 'Cache-Control: no-cache')
+          if [[ -n "$STAGING_READ_TOKEN" ]]; then args+=(-H "Authorization: Bearer $STAGING_READ_TOKEN"); fi
+          deployed_sha="$(curl "${args[@]}" "$STAGING_VERSION_URL" | jq -er '.sha | select(type == "string")')"
+          [[ "$deployed_sha" == "$EXPECTED_SHA" ]] || { echo 'Staging is not running the expected revision'; exit 1; }
+
+      # Adapt runtime and package-manager versions to the application.
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the application's committed staging acceptance suite
+        env:
+          STAGING_READ_TOKEN: ${{ secrets.STAGING_READ_TOKEN }}
+        # EXAMPLE: configure this Playwright project to use PLAYWRIGHT_BASE_URL,
+        # staging-only test data, and trace: 'retain-on-failure'. Adapt the command
+        # to the application's existing suite; oar does not supply browser tests.
+        run: pnpm exec playwright test --project=staging --reporter=html
+
+      - name: Upload report and failure traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: staging-verification-${{ inputs.expected_sha }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14

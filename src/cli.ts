@@ -13,14 +13,14 @@ import { buildCtx, type Ctx } from './context.js'
 import { EXIT, OarError, usage } from './errors.js'
 import { redact } from './exec.js'
 
-const HELP = `oar — remote coding on boat.dev (one VM per repo, Herdr on the VM, Claude Code tasks → draft PRs)
+const HELP = `oar — Claude and Codex coding on boat.dev, from repository plans to verified staging
 
   oar vm new|up|stop|keep|ssh|tunnel|preview|setup|snapshot|list [repo] [...]
   oar task new|dispatch|status|read|steer|keys|attach|done|resume|close|list [...]
   oar status [--all]            every VM and task on one screen
   oar watch [--until-idle]      poll live tasks, notify on blocked/done, keep the VM alive
   oar doctor [--repo r] [--quiet]
-  oar factory setup|deploy|status|log|pause|resume|attach|up|stop|doctor|states
+  oar factory setup|deploy|check|status|evidence|log|pause|resume|attach|up|stop|doctor|states
   oar ticket example|check|create   a planned piece of work → Linear tickets in Backlog
 
 vm
@@ -42,13 +42,13 @@ vm
 
 task
   new <slug> [--repo r] [--hours N] [--brief FILE|-]     brief from a file, stdin (-), or $EDITOR on the template
-  dispatch <id|slug> [--reuse-branch]                   worktree + Claude in a Herdr pane on the VM
+  dispatch <id|slug> [--reuse-branch]                   worktree + configured agent in a Herdr pane on the VM
   status <id|slug> [--read N]   derived status (agent state, PR, done marker)
   read <id|slug> [--lines N]    the agent's recent output
   steer <id|slug> "message"     send a message to the running agent
   keys <id|slug> <key...>       answer a dialog: enter, esc, y, ctrl+c, ...
   attach <id|slug>              focus the agent and attach Herdr
-  done <id|slug>                push + draft PR from the VM when Claude stopped short of it
+  done <id|slug>                push + draft PR from the VM when the agent stopped short of it
   resume <id|slug>              re-attach after the VM was stopped and resumed
   close <id|slug>               hide it from lists
   list [--all]
@@ -57,6 +57,8 @@ factory (an always-on controller VM turns Linear issues into tasks on the repo V
   setup                         create/resume the controller, copy oar there, join the tailnet, register workers, start the service
   deploy                        rebuild oar, copy it and the config to the controller, restart the service
   status | log [ISSUE] [-f]     what the controller is doing (forwarded over ssh)
+  evidence <ISSUE>              JSON history of checks, reviews, deployment, and verification
+  check                         validate local staging and reviewer settings before rollout
   pause | resume                stop/allow new dispatches
   attach <ENG-12>               focus the issue's agent on its worker and attach Herdr
   up | stop                     the controller sandbox itself

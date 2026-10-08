@@ -3,7 +3,7 @@ import { DEFAULT_CONFIG, type RepoConfig } from '../../src/config.js'
 import { checkRuns, GhFeed, OAR_MARKER, reviewFeed, workflowRun } from '../../src/factory/github.js'
 import { FakeExec } from '../fakes/exec.js'
 
-const repo: RepoConfig = { ...DEFAULT_CONFIG.repos.engine!, github: 'o/r' }
+const repo: RepoConfig = { ...DEFAULT_CONFIG.repos.engine!, github: 'o/r', requiredChecks: [] }
 const feed = (exec: FakeExec) => new GhFeed(exec, null, null, repo)
 const json = (v: unknown) => ({ stdout: JSON.stringify(v) })
 
@@ -198,25 +198,36 @@ describe('reviewFeed', () => {
 })
 
 describe('checkRuns', () => {
-  const runs = (check_runs: unknown[]) =>
-    new FakeExec().on(/gh api repos\/o\/r\/commits\/abc\/check-runs/, json({ check_runs }))
+  const check = (name: string, conclusion: string | null = 'success', id = 1) => ({
+    id,
+    name,
+    head_sha: 'abc',
+    status: 'completed',
+    conclusion,
+  })
+  const runs = (check_runs: unknown[], statuses: unknown[] = []) =>
+    new FakeExec()
+      .on(/gh api --paginate --slurp repos\/o\/r\/commits\/abc\/check-runs/, json([{ check_runs }]))
+      .on(/gh api --paginate --slurp repos\/o\/r\/commits\/abc\/statuses/, json([statuses]))
 
-  it('classifies failed checks', async () => {
+  it('fails closed for every non-successful terminal conclusion', async () => {
     const r = await checkRuns(
       feed(
         runs([
-          { name: 'lint', status: 'completed', conclusion: 'failure' },
-          { name: 'slow', status: 'completed', conclusion: 'timed_out' },
-          { name: 'stop', status: 'completed', conclusion: 'cancelled' },
-          { name: 'test', status: 'completed', conclusion: 'success' },
-          { name: 'skip', status: 'completed', conclusion: 'skipped' },
+          check('lint', 'failure'),
+          check('slow', 'timed_out'),
+          check('stop', 'cancelled'),
+          check('test'),
+          check('skip', 'skipped'),
+          check('neutral', 'neutral'),
+          check('unknown', null),
         ]),
       ),
       'abc',
     )
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       headSha: 'abc',
-      failed: ['lint', 'slow'],
+      failed: ['lint', 'slow', 'stop', 'skip', 'neutral', 'unknown'],
       pending: false,
       passed: false,
     })
@@ -224,63 +235,138 @@ describe('checkRuns', () => {
 
   it('reports pending while any run is incomplete', async () => {
     const r = await checkRuns(
-      feed(
-        runs([
-          { name: 'a', status: 'completed', conclusion: 'success' },
-          { name: 'b', status: 'in_progress' },
-        ]),
-      ),
+      feed(runs([check('a'), { ...check('b'), status: 'in_progress' }])),
       'abc',
     )
     expect(r).toMatchObject({ failed: [], pending: true, passed: false })
   })
 
-  it('passes when all runs succeed', async () => {
-    const r = await checkRuns(
-      feed(runs([{ name: 'a', status: 'completed', conclusion: 'success' }])),
-      'abc',
-    )
-    expect(r).toMatchObject({ failed: [], pending: false, passed: true })
+  it('passes only when the configured required set exists and succeeds', async () => {
+    const gh = new GhFeed(runs([check('test')]), null, null, {
+      ...repo,
+      requiredChecks: ['test', 'lint'],
+    })
+    expect(await checkRuns(gh, 'abc')).toMatchObject({
+      missing: ['lint'],
+      pending: true,
+      passed: false,
+    })
+    expect(await checkRuns(feed(runs([check('test')])), 'abc')).toMatchObject({ passed: true })
   })
 
-  it('does not pass with no runs, and returns null on bad output', async () => {
+  it('paginates checks and commit statuses and uses the newest rerun/context', async () => {
+    const exec = new FakeExec()
+      .on(
+        /check-runs/,
+        json([
+          { check_runs: [check('test', 'failure', 1)] },
+          { check_runs: [check('test', 'success', 2)] },
+        ]),
+      )
+      .on(
+        /statuses/,
+        json([
+          [{ id: 4, context: 'legacy', state: 'success' }],
+          [{ id: 3, context: 'legacy', state: 'failure' }],
+        ]),
+      )
+    expect(await checkRuns(feed(exec), 'abc')).toMatchObject({
+      passed: true,
+      checks: [
+        { name: 'test', state: 'success', source: 'check' },
+        { name: 'legacy', state: 'success', source: 'status' },
+      ],
+    })
+    expect(exec.lines().every((line) => line.includes('--paginate --slurp'))).toBe(true)
+  })
+
+  it('does not let another GitHub app mask a failed check with the same name', async () => {
+    const gh = feed(
+      runs([
+        { ...check('test', 'failure', 1), app: { id: 1 } },
+        { ...check('test', 'success', 2), app: { id: 2 } },
+      ]),
+    )
+    expect(await checkRuns(gh, 'abc')).toMatchObject({ passed: false, failed: ['test'] })
+  })
+
+  it('legacy statuses can fail or satisfy configured checks', async () => {
+    expect(
+      await checkRuns(
+        feed(runs([check('test')], [{ id: 1, context: 'legacy', state: 'error' }])),
+        'abc',
+      ),
+    ).toMatchObject({ passed: false, failed: ['legacy'] })
+    const gh = new GhFeed(runs([], [{ id: 1, context: 'legacy', state: 'success' }]), null, null, {
+      ...repo,
+      requiredChecks: ['legacy'],
+    })
+    expect(await checkRuns(gh, 'abc')).toMatchObject({ passed: true, missing: [] })
+  })
+
+  it('does not pass with no runs, missing pages, bad output or the wrong revision', async () => {
     expect(await checkRuns(feed(runs([])), 'abc')).toMatchObject({ passed: false, pending: false })
     expect(await checkRuns(feed(new FakeExec()), 'abc')).toBeNull()
+    expect(await checkRuns(feed(runs([{ ...check('test'), head_sha: 'old' }])), 'abc')).toBeNull()
+    const missingStatuses = new FakeExec().on(/check-runs/, json([{ check_runs: [check('test')] }]))
+    expect(await checkRuns(feed(missingStatuses), 'abc')).toBeNull()
     const bad = new FakeExec().on(/gh api/, json({ nope: 1 }))
     expect(await checkRuns(feed(bad), 'abc')).toBeNull()
   })
 })
 
 describe('workflowRun', () => {
-  it('returns the first run summary and encodes the branch', async () => {
+  const run = {
+    id: 1,
+    run_attempt: 1,
+    head_sha: 'abc',
+    head_branch: 'release/1',
+    status: 'completed',
+    conclusion: 'success',
+    html_url: 'https://gh/run/1',
+    run_started_at: '2026-10-08T09:00:00Z',
+    updated_at: '2026-10-08T09:10:00Z',
+  }
+  it('paginates and selects the newest exact revision and branch', async () => {
     const exec = new FakeExec().on(
-      /gh api repos\/o\/r\/actions\/workflows\/deploy\.yml\/runs\?head_sha=abc&branch=release%2F1&per_page=5/,
-      json({
-        workflow_runs: [
-          { status: 'completed', conclusion: 'success', html_url: 'https://gh/run/1' },
-          { status: 'queued', html_url: 'https://gh/run/0' },
-        ],
-      }),
+      /gh api --paginate --slurp repos\/o\/r\/actions\/workflows\/deploy\.yml\/runs\?head_sha=abc&branch=release%2F1&per_page=100/,
+      json([
+        {
+          workflow_runs: [
+            { ...run, id: 9, head_sha: 'old' },
+            { ...run, id: 8, head_branch: 'wrong' },
+          ],
+        },
+        { workflow_runs: [run] },
+      ]),
     )
     expect(await workflowRun(feed(exec), 'deploy.yml', 'abc', 'release/1')).toEqual({
+      headSha: 'abc',
       status: 'completed',
       conclusion: 'success',
       url: 'https://gh/run/1',
+      runId: 1,
+      attempt: 1,
+      startedAt: '2026-10-08T09:00:00Z',
+      completedAt: '2026-10-08T09:10:00Z',
+      runName: '',
     })
   })
 
-  it('returns null conclusion while running, and null with no runs or on failure', async () => {
+  it('returns a pending snapshot, and null with no exact run or on failure', async () => {
     const running = new FakeExec().on(
       /gh api/,
-      json({ workflow_runs: [{ status: 'in_progress', html_url: 'u' }] }),
+      json({ workflow_runs: [{ ...run, status: 'in_progress', conclusion: null }] }),
     )
-    expect(await workflowRun(feed(running), 'd.yml', 'abc', 'main')).toEqual({
+    expect(await workflowRun(feed(running), 'd.yml', 'abc', 'release/1')).toMatchObject({
       status: 'in_progress',
       conclusion: null,
-      url: 'u',
+      completedAt: null,
     })
     const none = new FakeExec().on(/gh api/, json({ workflow_runs: [] }))
     expect(await workflowRun(feed(none), 'd.yml', 'abc', 'main')).toBeNull()
+    const wrong = new FakeExec().on(/gh api/, json({ workflow_runs: [run] }))
+    expect(await workflowRun(feed(wrong), 'd.yml', 'wrong', 'main')).toBeNull()
     expect(await workflowRun(feed(new FakeExec()), 'd.yml', 'abc', 'main')).toBeNull()
   })
 })

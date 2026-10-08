@@ -1,6 +1,8 @@
-import { mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { hostname } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
+import { redact } from '../exec.js'
 import type { TokenRecord, TokenStore } from './linear.js'
 import {
   ACTIVE_PHASES,
@@ -77,6 +79,21 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_issue ON events(issue_id, id);
 CREATE TABLE IF NOT EXISTS cursors (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evidence_issue ON evidence(issue_id, id);
+CREATE TABLE IF NOT EXISTS controller_owner (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  owner TEXT NOT NULL,
+  host TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL
+);
 `
 
 /** Columns added after the first live deploy; `migrate()` adds them to an existing database. */
@@ -239,6 +256,21 @@ export interface EventRow {
   detail: string
 }
 
+export interface EvidenceRow {
+  stage: string
+  data: Record<string, unknown>
+  createdAt: string
+}
+
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
 /** The controller's store: issues as the factory sees them, comment delivery, idempotency keys, events. */
 export class FactoryDb {
   private readonly db: DatabaseSync
@@ -249,6 +281,7 @@ export class FactoryDb {
   ) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
+    if (path !== ':memory:') chmodSync(path, 0o600)
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec('PRAGMA busy_timeout = 5000;')
     this.db.exec(SCHEMA)
@@ -269,6 +302,63 @@ export class FactoryDb {
   }
 
   private iso = () => new Date(this.now()).toISOString()
+
+  /** One controller process on one host. Never steal ownership from a live or remote process. */
+  acquireController(
+    owner: string,
+    opts: { host?: string; pid?: number; alive?: (pid: number) => boolean } = {},
+  ): boolean {
+    const host = opts.host ?? hostname()
+    const pid = opts.pid ?? process.pid
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.db
+        .prepare('SELECT * FROM controller_owner WHERE singleton = 1')
+        .get() as Row | undefined
+      if (current && (current.host !== host || (opts.alive ?? pidAlive)(num(current.pid)))) {
+        this.db.exec('COMMIT')
+        return false
+      }
+      this.db.prepare('DELETE FROM controller_owner WHERE singleton = 1').run()
+      this.db
+        .prepare('INSERT INTO controller_owner VALUES (1, ?, ?, ?, ?)')
+        .run(owner, host, pid, this.iso())
+      this.db.exec('COMMIT')
+      return true
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  releaseController(owner: string): void {
+    this.db.prepare('DELETE FROM controller_owner WHERE singleton = 1 AND owner = ?').run(owner)
+  }
+
+  /** Append evidence on a change, preserving all prior revisions and failed attempts. */
+  recordEvidence(issueId: string, stage: string, data: Record<string, unknown>): void {
+    const json = redact(JSON.stringify(data))
+    const last = this.db
+      .prepare(
+        'SELECT data FROM evidence WHERE issue_id = ? AND stage = ? ORDER BY id DESC LIMIT 1',
+      )
+      .get(issueId, stage) as Row | undefined
+    if (last?.data === json) return
+    this.db
+      .prepare('INSERT INTO evidence (issue_id, stage, data, created_at) VALUES (?, ?, ?, ?)')
+      .run(issueId, stage, json, this.iso())
+  }
+
+  evidence(issueId: string): EvidenceRow[] {
+    const rows = this.db
+      .prepare('SELECT stage, data, created_at FROM evidence WHERE issue_id = ? ORDER BY id')
+      .all(issueId) as Row[]
+    return rows.map((r) => ({
+      stage: str(r.stage),
+      data: JSON.parse(str(r.data)) as Record<string, unknown>,
+      createdAt: str(r.created_at),
+    }))
+  }
 
   // ---- issues -------------------------------------------------------------------------------
 

@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { ensureDeadline, runCommand } from '../boat.js'
 import { validateSlug, vmDoneMarker, writeBrief } from '../brief.js'
 import { dispatchTask } from '../commands/task.js'
@@ -8,7 +9,13 @@ import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
 import { redact, shq } from '../exec.js'
 import { ghRun, prSnapshot } from '../github.js'
-import { promptAgent, resumeHerdr, stopAgent, type HerdrHandle } from '../runner.js'
+import {
+  promptAgent,
+  resumeHerdr,
+  stopAgent,
+  taskAgentIdentity,
+  type HerdrHandle,
+} from '../runner.js'
 import { loadState, mutateState, type Task } from '../state.js'
 import { hoursFromNow, nowIso } from '../time.js'
 import {
@@ -21,8 +28,10 @@ import {
   roundToken,
 } from './brief.js'
 import type { FactoryDb } from './db.js'
+import { checkRuns, GhFeed, verificationRequestKey } from './github.js'
 import type { Jobs } from './jobs.js'
 import { LinearClient, LinearError, newCommentId } from './linear.js'
+import { deliveryBusy } from './observe.js'
 import {
   findingsComment,
   findingsLine,
@@ -37,6 +46,7 @@ import {
   verdictOf,
   type ReviewOutput,
 } from './review.js'
+import { runIsolatedReview } from './review-sandbox.js'
 import type {
   Action,
   HumanComment,
@@ -136,6 +146,26 @@ export class Applier {
     private readonly deps: ApplyDeps,
   ) {}
 
+  /** A timed-out or canceled background operation may finish later, but cannot revive the run. */
+  private async jobCurrent(
+    row: IssueRow,
+    handle?: HerdrHandle,
+    taskId = row.taskId,
+  ): Promise<boolean> {
+    const current = this.deps.db.issue(row.id)
+    if (current?.phase === row.phase && current.jobStartedAt === row.jobStartedAt) return true
+    if (handle)
+      await stopAgent(this.ctx, repoConfig(this.ctx.config, row.repo), handle).catch(
+        () => undefined,
+      )
+    if (taskId)
+      await mutateState(this.ctx.paths, (state) => {
+        const task = state.tasks[taskId]
+        if (task) task.status = 'closed'
+      })
+    return false
+  }
+
   /** Post a comment once per (issue, key); a crash between the reservation and Linear is retried with the same id. */
   async comment(row: IssueRow, key: string, body: string): Promise<void> {
     const { db, linear } = this.deps
@@ -233,6 +263,12 @@ export class Applier {
               log(`${current.identifier}: could not attach the PR: ${firstLine(e)}`),
             )
           break
+        case 'record_evidence':
+          db.recordEvidence(current.id, a.stage, a.data)
+          break
+        case 'acknowledge':
+          for (const comment of a.comments) db.markDelivered(comment.id, a.reason)
+          break
         case 'event':
           db.event(a.name, a.detail ?? '', current.id, current.taskId)
           break
@@ -290,6 +326,14 @@ export class Applier {
             current.repo,
             () => this.autoReviewJob(current.id, a.sha),
             (e) => log(`${current.identifier}: automated review failed: ${firstLine(e)}`),
+          )
+          break
+        case 'verify_staging':
+          void jobs.run(
+            current.id,
+            current.repo,
+            () => this.verifyStagingJob(current.id, a),
+            (e) => log(`${current.identifier}: verification dispatch failed: ${firstLine(e)}`),
           )
           break
         case 'merge':
@@ -364,7 +408,7 @@ export class Applier {
   }
 
   /**
-   * Check out the PR head detached on the worker VM, run the reviewer read-only, record its
+   * Check out the PR head in the configured isolated environment, run the reviewer, record its
    * verdict for this SHA (an error too, so a broken reviewer runs once per SHA, never in a loop),
    * and post the findings on the PR and the issue.
    */
@@ -376,6 +420,16 @@ export class Applier {
     if (!task) return this.reviewFailed(row, sha, 'no task is recorded for the issue')
     const cfg = repoConfig(this.ctx.config, row.repo)
     const review = this.ctx.config.factory.review
+    const builder = taskAgentIdentity(task, cfg)
+    if (
+      review.runner === builder.kind &&
+      !(builder.model && review.model && builder.model !== review.model)
+    )
+      return this.reviewFailed(
+        row,
+        sha,
+        'review must use a different runner, or explicitly different buildModel and review.model values',
+      )
     const files = reviewFiles(task.id)
     const wt = reviewWorktree(cfg, task.id)
     db.updateIssue(row.id, { jobStartedAt: new Date(this.ctx.now()).toISOString() })
@@ -383,36 +437,40 @@ export class Applier {
     let sandboxId: string | null = null
     let out: ReviewOutput
     try {
-      const up = await ensureUp(this.ctx, row.repo, log, { herdr: false })
-      sandboxId = up.vm.sandboxId
-      const prep = await runCommand(
-        this.ctx.boat,
-        sandboxId,
-        reviewCheckout(cfg, { wt, sha, branch: task.branch, files }),
-        { cwd: cfg.vmPath, timeoutSeconds: 300 },
-      )
-      if (prep.exitCode !== 0)
-        throw new Error(`could not check out ${sha.slice(0, 7)}: ${prep.stderr || prep.stdout}`)
-      await this.ctx.boat.writeFile(
-        sandboxId,
-        files.prompt,
-        reviewPrompt(row, cfg, { url: row.prUrl ?? '', headSha: sha }, review.blocking, files),
-      )
-      await this.ctx.boat.writeFile(sandboxId, files.schema, JSON.stringify(REVIEW_SCHEMA))
-      const timeoutSeconds = Math.round(review.timeoutMinutes * 60)
-      const r = await runCommand(
-        this.ctx.boat,
-        sandboxId,
-        reviewCommand(review.runner, { cwd: wt, files, timeoutSeconds, model: review.model }),
-        { timeoutSeconds: timeoutSeconds + 60 },
-      )
-      const text = await this.ctx.boat.readFile(sandboxId, files.out).catch(() => null)
-      if (r.exitCode !== 0 || !text?.trim()) {
-        const runLog = await this.ctx.boat.readFile(sandboxId, files.log).catch(() => null)
-        const how = r.timedOut || r.exitCode === 124 ? 'timed out' : `exited ${r.exitCode ?? '?'}`
-        throw new Error(`${review.runner} ${how}\n${runLog || r.stderr || r.stdout}`)
+      if (review.isolation === 'sandbox') {
+        out = await this.isolatedReview(row, task, cfg, sha)
+      } else {
+        const up = await ensureUp(this.ctx, row.repo, log, { herdr: false })
+        sandboxId = up.vm.sandboxId
+        const prep = await runCommand(
+          this.ctx.boat,
+          sandboxId,
+          reviewCheckout(cfg, { wt, sha, branch: task.branch, files }),
+          { cwd: cfg.vmPath, timeoutSeconds: 300 },
+        )
+        if (prep.exitCode !== 0)
+          throw new Error(`could not check out ${sha.slice(0, 7)}: ${prep.stderr || prep.stdout}`)
+        await this.ctx.boat.writeFile(
+          sandboxId,
+          files.prompt,
+          reviewPrompt(row, cfg, { url: row.prUrl ?? '', headSha: sha }, review.blocking, files),
+        )
+        await this.ctx.boat.writeFile(sandboxId, files.schema, JSON.stringify(REVIEW_SCHEMA))
+        const timeoutSeconds = Math.round(review.timeoutMinutes * 60)
+        const r = await runCommand(
+          this.ctx.boat,
+          sandboxId,
+          reviewCommand(review.runner, { cwd: wt, files, timeoutSeconds, model: review.model }),
+          { timeoutSeconds: timeoutSeconds + 60 },
+        )
+        const text = await this.ctx.boat.readFile(sandboxId, files.out).catch(() => null)
+        if (r.exitCode !== 0 || !text?.trim()) {
+          const runLog = await this.ctx.boat.readFile(sandboxId, files.log).catch(() => null)
+          const how = r.timedOut || r.exitCode === 124 ? 'timed out' : `exited ${r.exitCode ?? '?'}`
+          throw new Error(`${review.runner} ${how}\n${runLog || r.stderr || r.stdout}`)
+        }
+        out = parseReviewOutput(review.runner, text)
       }
-      out = parseReviewOutput(review.runner, text)
     } catch (e) {
       return this.reviewFailed(row, sha, (e as Error).message ?? String(e))
     } finally {
@@ -424,7 +482,15 @@ export class Applier {
           { cwd: cfg.vmPath, timeoutSeconds: 60 },
         ).catch(() => undefined)
     }
+    if (db.issue(row.id)?.phase !== 'review') return
     const verdict = verdictOf(out.findings, review.blocking)
+    db.recordEvidence(row.id, 'review', {
+      sha,
+      runner: review.runner,
+      model: review.model ?? null,
+      verdict,
+      findings: out.findings,
+    })
     db.updateIssue(row.id, {
       reviewedSha: sha,
       reviewVerdict: verdict,
@@ -439,11 +505,12 @@ export class Applier {
     )
     const fresh = db.issue(row.id) ?? row
     const next = this.reviewNext(fresh, verdict)
+    const commentSandboxId = loadState(this.ctx.paths).vms[row.repo]?.sandboxId ?? null
     if (row.prNumber) {
       const posted = await ghRun(
         this.ctx.exec,
         this.ctx.boat,
-        sandboxId,
+        commentSandboxId,
         ['pr', 'comment', String(row.prNumber), '--repo', cfg.github, '--body-file', '-'],
         {
           input: findingsComment(out, {
@@ -468,6 +535,112 @@ export class Applier {
         next,
       }),
     )
+  }
+
+  private async isolatedReview(
+    row: IssueRow,
+    task: Task,
+    cfg: RepoConfig,
+    sha: string,
+  ): Promise<ReviewOutput> {
+    const { db } = this.deps
+    const review = this.ctx.config.factory.review
+    const history = db.evidence(row.id)
+    let previous = history
+      .filter((e) => e.stage === 'review-attempt' && e.data.sha === sha)
+      .at(-1)?.data
+    if (
+      previous &&
+      (previous.runner !== review.runner || previous.model !== (review.model ?? null))
+    ) {
+      if (typeof previous.sandboxId !== 'string')
+        throw new Error(
+          'the previous review creation outcome is unknown under a different model configuration; restore that configuration to reconcile it before changing reviewers',
+        )
+      const sandbox = await this.ctx.boat.get(previous.sandboxId)
+      if (sandbox.state !== 'archived') await this.ctx.boat.stop(previous.sandboxId, true)
+      db.recordEvidence(row.id, 'review-attempt', {
+        ...previous,
+        status: 'failed',
+        reason: 'reviewer configuration changed',
+      })
+      previous = undefined
+    }
+    const prior = previous
+    const receipt = prior
+      ? history
+          .filter(
+            (e) => e.stage === 'review-artifacts' && e.data.idempotencyKey === prior.idempotencyKey,
+          )
+          .at(-1)?.data
+      : undefined
+    const completedReceipt =
+      receipt && receipt.exitCode === 0 && !receipt.error && typeof receipt.output === 'string'
+    // An unknown create outcome must reuse its key: it may already own a remote sandbox.
+    // Completed artifacts survive a crash at any point between capture and cleanup receipts.
+    const recover = prior && (prior.status !== 'failed' || !prior.sandboxId || completedReceipt)
+    const idempotencyKey =
+      recover && typeof prior.idempotencyKey === 'string'
+        ? prior.idempotencyKey
+        : `oar-review-${randomUUID()}`
+    const sandboxId = recover && typeof prior.sandboxId === 'string' ? prior.sandboxId : undefined
+    if (recover && completedReceipt && sandboxId) {
+      const sandbox = await this.ctx.boat.get(sandboxId)
+      if (sandbox.state !== 'archived') await this.ctx.boat.stop(sandboxId, true)
+      db.recordEvidence(row.id, 'review-attempt', { ...prior, status: 'stopped' })
+      return parseReviewOutput(review.runner, receipt.output as string)
+    }
+    const identity = { sha, idempotencyKey, runner: review.runner, model: review.model ?? null }
+    if (!recover) db.recordEvidence(row.id, 'review-attempt', { ...identity, status: 'started' })
+    let currentSandboxId = sandboxId
+    try {
+      const result = await runIsolatedReview(this.ctx.boat, {
+        cfg,
+        row,
+        taskId: task.id,
+        headSha: sha,
+        branch: task.branch,
+        runner: review.runner,
+        model: review.model,
+        blocking: review.blocking,
+        timeoutSeconds: Math.round(review.timeoutMinutes * 60),
+        environment: cfg.reviewEnvName,
+        attempt: { idempotencyKey, sandboxId },
+        onSandbox: async (id) => {
+          currentSandboxId = id
+          db.recordEvidence(row.id, 'review-attempt', {
+            ...identity,
+            status: 'running',
+            sandboxId: id,
+          })
+        },
+        onEvidence: async (evidence) => {
+          db.recordEvidence(row.id, 'review-artifacts', {
+            ...identity,
+            ...evidence,
+            output: evidence.output ? redact(evidence.output) : null,
+            log: evidence.log ? redact(evidence.log) : null,
+            diff: evidence.diff ? redact(evidence.diff) : null,
+            error: evidence.error ? redact(evidence.error) : null,
+          })
+        },
+        onStopped: async (id) => {
+          db.recordEvidence(row.id, 'review-attempt', {
+            ...identity,
+            status: 'stopped',
+            sandboxId: id,
+          })
+        },
+      })
+      return result.out
+    } catch (error) {
+      db.recordEvidence(row.id, 'review-attempt', {
+        ...identity,
+        status: 'failed',
+        sandboxId: currentSandboxId ?? null,
+      })
+      throw error
+    }
   }
 
   private async reviewFailed(row: IssueRow, sha: string, why: string): Promise<void> {
@@ -500,6 +673,8 @@ export class Applier {
     const row = db.issue(rowId)
     if (!row || row.phase !== 'review' || row.mergeSha === a.sha) return
     const cfg = repoConfig(this.ctx.config, row.repo)
+    // Jobs serialize each repo, so reserve this head only after the prior delivery has released staging.
+    if (deliveryBusy(db, row, cfg.deliveryMode)) return
     db.updateIssue(row.id, {
       mergeSha: a.sha,
       jobStartedAt: new Date(this.ctx.now()).toISOString(),
@@ -508,6 +683,31 @@ export class Applier {
     const sandboxId = loadState(this.ctx.paths).vms[row.repo]?.sandboxId ?? null
     const gh = (args: string[]) => ghRun(this.ctx.exec, this.ctx.boat, sandboxId, args)
     try {
+      const latest = await this.deps.linear.issue(row.id)
+      if (
+        !latest ||
+        latest.trashed ||
+        latest.archivedAt ||
+        ['completed', 'canceled'].includes(latest.state.type)
+      )
+        throw new Error('the Linear issue is unavailable, canceled, archived or already complete')
+      if (
+        latest.labels.some(
+          (label) => label.toLowerCase() === this.ctx.config.factory.holdLabel.toLowerCase(),
+        ) ||
+        !cfg.autoMerge
+      )
+        throw new Error('auto-merge is disabled or the Linear issue is held')
+      if (row.reviewedSha !== a.sha || row.reviewVerdict !== 'pass')
+        throw new Error('the current head has no passing automated review')
+      if (cfg.deliveryMode === 'staging' && (!cfg.deployWorkflow || !cfg.verifyWorkflow))
+        throw new Error('staging delivery requires deployWorkflow and verifyWorkflow')
+      const ci = await checkRuns(new GhFeed(this.ctx.exec, this.ctx.boat, sandboxId, cfg), a.sha)
+      if (ci) db.recordEvidence(row.id, 'ci', { ...ci, sha: a.sha })
+      if (!ci?.passed || ci.pending || ci.headSha !== a.sha)
+        throw new Error(
+          `required checks are not successful for ${a.sha}${ci?.missing.length ? `; missing: ${ci.missing.join(', ')}` : ''}`,
+        )
       if (a.isDraft) {
         const ready = await gh(['pr', 'ready', String(a.number), '--repo', cfg.github])
         if (!ready.ok) throw new Error(`gh pr ready: ${ready.stderr || ready.stdout}`)
@@ -547,10 +747,78 @@ export class Applier {
     }
   }
 
+  /** Reserve first, then dispatch once. An uncertain HTTP response is reconciled by run identity. */
+  private async verifyStagingJob(
+    rowId: string,
+    action: { sha: string; deploymentRunId: number; deploymentAttempt: number },
+  ): Promise<void> {
+    const { db, log } = this.deps
+    const row = db.issue(rowId)
+    if (!row || !['merged', 'verifying'].includes(row.phase) || row.roundStartSha !== action.sha)
+      return
+    const cfg = repoConfig(this.ctx.config, row.repo)
+    if (!cfg.verifyWorkflow) return
+    const requestKey = verificationRequestKey(
+      row.id,
+      action.sha,
+      action.deploymentRunId,
+      action.deploymentAttempt,
+      row.roundStartedAt,
+    )
+    if (
+      db
+        .evidence(row.id)
+        .some((e) => e.stage === 'verification-dispatch' && e.data.requestKey === requestKey)
+    )
+      return
+    const identity = {
+      requestKey,
+      sha: action.sha,
+      workflow: cfg.verifyWorkflow,
+      deploymentRunId: action.deploymentRunId,
+      deploymentAttempt: action.deploymentAttempt,
+      deliveryStartedAt: row.roundStartedAt,
+    }
+    db.recordEvidence(row.id, 'verification-dispatch', { ...identity, status: 'intent' })
+    try {
+      // Delivery credentials belong to the controller; never fall back to a coding VM.
+      const result = await ghRun(this.ctx.exec, null, null, [
+        'api',
+        '--method',
+        'POST',
+        `repos/${cfg.github}/actions/workflows/${encodeURIComponent(cfg.verifyWorkflow)}/dispatches`,
+        '-f',
+        `ref=${cfg.baseBranch}`,
+        '-f',
+        `inputs[expected_sha]=${action.sha}`,
+        '-f',
+        `inputs[oar_run_id]=${requestKey}`,
+      ])
+      db.recordEvidence(row.id, 'verification-dispatch', {
+        ...identity,
+        status: result.ok ? 'accepted' : 'unknown',
+        error: result.ok ? null : scrub(result.stderr || result.stdout),
+      })
+      if (!result.ok)
+        log(
+          `${row.identifier}: verification dispatch outcome is unknown; observing ${requestKey} before any retry`,
+        )
+    } catch (error) {
+      db.recordEvidence(row.id, 'verification-dispatch', {
+        ...identity,
+        status: 'unknown',
+        error: scrub(firstLine(error)),
+      })
+      log(
+        `${row.identifier}: verification dispatch outcome is unknown; observing ${requestKey} before any retry`,
+      )
+    }
+  }
+
   private async dispatchJob(rowId: string): Promise<void> {
     const { db, linear, log } = this.deps
     const row = db.issue(rowId)
-    if (!row) return
+    if (!row || !['dispatching', 'resuming'].includes(row.phase)) return
     const cfg = repoConfig(this.ctx.config, row.repo)
     try {
       const all = await linear.comments([row.id], null).catch(() => [])
@@ -566,12 +834,26 @@ export class Applier {
       }
       const parent = await this.parentPlan(row)
       const task = await ensureTask(this.ctx, row, cfg, db, parent)
+      if (!(await this.jobCurrent(row))) return
+      const builder = taskAgentIdentity(task, cfg)
       const round = row.round + 1
+      db.recordEvidence(row.id, 'input', {
+        taskId: task.id,
+        round,
+        description: row.description,
+        brief: readFileSync(task.briefPath, 'utf8'),
+        runner: builder.kind,
+        model: builder.model ?? null,
+        branch: task.branch,
+        baseBranch: cfg.baseBranch,
+        parentPlan: parent,
+      })
       const result = await dispatchTask(this.ctx, task, {
         log,
         reuseBranch: true,
         footer: factoryFooter(task, row),
       })
+      if (!(await this.jobCurrent(row, result.handle, task.id))) return
       for (const c of db.undelivered(row.id)) db.markDelivered(c.id, 'brief')
       db.updateIssue(row.id, {
         phase: 'building',
@@ -590,14 +872,15 @@ export class Applier {
       )
       await this.setState(fresh, 'inProgress')
     } catch (e) {
-      await this.fail(row, 'start the agent', e)
+      if (!['failed', 'closed'].includes(db.issue(row.id)?.phase ?? 'closed'))
+        await this.fail(row, 'start the agent', e)
     }
   }
 
   private async resumeJob(rowId: string, message: string, deliver: HumanComment[]): Promise<void> {
     const { db, log } = this.deps
     const row = db.issue(rowId)
-    if (!row) return
+    if (!row || row.phase !== 'resuming') return
     const task = taskFor(this.ctx, row)
     const handle = herdrHandle(task)
     if (!task || !handle) return this.dispatchJob(rowId)
@@ -605,7 +888,9 @@ export class Applier {
     try {
       const up = await ensureUp(this.ctx, row.repo, log)
       if (!up.herdrReachable) throw new OarError('herdr', `Herdr on ${row.repo} is not reachable`)
+      if (!(await this.jobCurrent(row, handle))) return
       const next = await resumeHerdr(this.ctx, task, cfg, up.vm.sandboxId, handle, log, message)
+      if (!(await this.jobCurrent(row, next))) return
       await mutateState(this.ctx.paths, (s) => {
         const t = s.tasks[task.id]
         if (t) {
@@ -620,13 +905,19 @@ export class Applier {
         hoursFromNow(Math.max(2, task.hours / 2), this.ctx.now()),
         { log, now: this.ctx.now },
       ).catch(() => null)
+      if (!(await this.jobCurrent(row, next))) return
       for (const c of deliver) db.markDelivered(c.id, 'resumed')
-      db.updateIssue(row.id, { phase: 'building', jobStartedAt: null })
+      db.updateIssue(row.id, {
+        phase: 'building',
+        jobStartedAt: null,
+        roundStartedAt: new Date(this.ctx.now()).toISOString(),
+      })
       db.event('resumed', message.slice(0, 80), row.id, task.id)
       const fresh = db.issue(row.id) ?? row
       await this.setState(fresh, 'inProgress')
     } catch (e) {
-      await this.fail(row, 'resume the agent', e)
+      if (!['failed', 'closed'].includes(db.issue(row.id)?.phase ?? 'closed'))
+        await this.fail(row, 'resume the agent', e)
     }
   }
 
@@ -652,8 +943,9 @@ export class Applier {
     const cfg = repoConfig(this.ctx.config, row.repo)
     const round = row.round + 1
     const now = new Date(this.ctx.now()).toISOString()
+    let active = row
     try {
-      db.updateIssue(row.id, {
+      active = db.updateIssue(row.id, {
         phase: 'building',
         round,
         roundStartedAt: now,
@@ -674,6 +966,7 @@ export class Applier {
       )
       const up = await ensureUp(this.ctx, row.repo, log)
       if (!up.herdrReachable) throw new OarError('herdr', `Herdr on ${row.repo} is not reachable`)
+      if (!(await this.jobCurrent(active, handle))) return
       const path = reviewPath(task.id, round)
       await this.ctx.boat.writeFile(
         up.vm.sandboxId,
@@ -698,6 +991,7 @@ export class Applier {
           if (t) t.handle = next
         })
       }
+      if (!(await this.jobCurrent(active, herdrHandle(taskFor(this.ctx, row)) ?? handle))) return
       await mutateState(this.ctx.paths, (s) => {
         const t = s.tasks[task.id]
         if (t) t.status = 'working'
@@ -711,6 +1005,7 @@ export class Applier {
           now: this.ctx.now,
         },
       ).catch(() => null)
+      if (!(await this.jobCurrent(active, herdrHandle(taskFor(this.ctx, row)) ?? handle))) return
       for (const c of a.deliver ?? []) db.markDelivered(c.id, 'round')
       db.updateIssue(row.id, { jobStartedAt: null })
       const fresh = db.issue(row.id) ?? row
@@ -721,7 +1016,8 @@ export class Applier {
       )
       await this.setState(fresh, 'inProgress')
     } catch (e) {
-      await this.fail(row, 'start the review round', e)
+      if (!['failed', 'closed'].includes(db.issue(row.id)?.phase ?? 'closed'))
+        await this.fail(row, 'start the review round', e)
     }
   }
 }

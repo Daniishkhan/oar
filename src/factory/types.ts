@@ -11,6 +11,8 @@ export const Phases = [
   'review',
   'resuming',
   'merged',
+  'verifying',
+  'delivery_failed',
   'closed',
   'failed',
 ] as const
@@ -23,11 +25,19 @@ export const ACTIVE_PHASES: ReadonlySet<Phase> = new Set([
   'review',
   'resuming',
   'merged',
+  'verifying',
+  'delivery_failed',
 ])
 /** Phases during which the worker VM must stay up. */
 export const HOLDING_PHASES: ReadonlySet<Phase> = new Set(['dispatching', 'building', 'resuming'])
 /** Phases that occupy a repo slot (one agent per VM until forks exist). */
 export const SLOT_PHASES: ReadonlySet<Phase> = new Set(['dispatching', 'building', 'resuming'])
+/** Phases between a merge and a verified (or failed) staging delivery. */
+export const DELIVERY_PHASES: ReadonlySet<Phase> = new Set([
+  'merged',
+  'verifying',
+  'delivery_failed',
+])
 
 /** Logical states; their Linear names live in config.factory.linear.states. */
 export const StateKeys = [
@@ -128,6 +138,18 @@ export interface ReviewComment {
   blocking?: boolean
 }
 
+export interface WorkflowSnapshot {
+  headSha: string
+  status: string
+  conclusion: string | null
+  url: string
+  runId: number
+  attempt: number
+  startedAt: string | null
+  completedAt: string | null
+  runName?: string
+}
+
 export interface Facts {
   /** null: no VM recorded for the repo. */
   vmUp: boolean | null
@@ -139,14 +161,28 @@ export interface Facts {
   paneTail: string
   undelivered: HumanComment[]
   review: { comments: ReviewComment[]; changesRequested: boolean; cursor: string | null }
-  ci: { headSha: string; failed: string[]; pending: boolean; passed: boolean } | null
-  staging: { conclusion: string | null; url: string | null } | null
+  ci: {
+    headSha: string
+    failed: string[]
+    pending: boolean
+    passed: boolean
+    missing?: string[]
+    checks?: Array<{ name: string; state: string; source: 'check' | 'status' }>
+  } | null
+  staging: WorkflowSnapshot | null
+  verification: WorkflowSnapshot | null
+  verificationRequested: boolean
   /** Where the issue's Linear state sits in our model right now. */
   linearKey: StateKey | 'other'
   /** The Linear state differs from the one the controller last set (a human or an automation moved it). */
   humanMoved: boolean
   nowIso: string
   slotFree: boolean
+  /**
+   * Another issue of the repo is between its merge and a verified delivery (staging mode), so a
+   * second merge would move the base branch under that verification: one delivery at a time.
+   */
+  deliveryBusy: boolean
   jobRunning: boolean
   jobAgeMs: number
   /** Issues this one is blocked by that are not done yet. */
@@ -158,6 +194,7 @@ export interface Facts {
 export interface Limits {
   maxCiRounds: number
   jobTimeoutMs: number
+  deliveryTimeoutMs: number
   maxReviewRounds: number
   /** An idle agent without the done marker or a question is reported as stalled only after this long. */
   stallGraceMs: number
@@ -178,8 +215,11 @@ export type Action =
       reviewSha?: string
     }
   | { kind: 'auto_review'; sha: string }
+  | { kind: 'verify_staging'; sha: string; deploymentRunId: number; deploymentAttempt: number }
   | { kind: 'merge'; number: number; sha: string; method: MergeMethod; isDraft: boolean }
   | { kind: 'reset_round_files' }
+  | { kind: 'acknowledge'; comments: HumanComment[]; reason: string }
+  | { kind: 'record_evidence'; stage: string; data: Record<string, unknown> }
   | { kind: 'comment'; key: string; body: string }
   | { kind: 'link_pr'; url: string }
   | { kind: 'set_state'; state: StateKey }

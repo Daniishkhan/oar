@@ -7,6 +7,7 @@ import type {
   HumanComment,
   IssueRow,
   PrSnapshot,
+  WorkflowSnapshot,
 } from '../../src/factory/types.js'
 
 const NOW = '2026-10-08T09:00:00.000Z'
@@ -60,10 +61,13 @@ const facts = (over: Partial<Facts> = {}): Facts => ({
   review: { comments: [], changesRequested: false, cursor: null },
   ci: null,
   staging: null,
+  verification: null,
+  verificationRequested: true,
   linearKey: 'ready',
   humanMoved: true,
   nowIso: NOW,
   slotFree: true,
+  deliveryBusy: false,
   jobRunning: false,
   jobAgeMs: 0,
   blocked: false,
@@ -97,6 +101,7 @@ const ctx: DecideContext = {
   limits: {
     maxCiRounds: 3,
     jobTimeoutMs: 30 * 60_000,
+    deliveryTimeoutMs: 180 * 60_000,
     maxReviewRounds: 3,
     stallGraceMs: 20 * 60_000,
   },
@@ -110,6 +115,8 @@ const ctx: DecideContext = {
   },
   mention: '@danish',
   tracksDeploy: false,
+  tracksVerification: false,
+  deliveryMode: 'merge',
   identifier: 'ENG-12',
   blocking: ['P0', 'P1'],
   holdLabel: 'hold',
@@ -303,6 +310,7 @@ describe('decide: building', () => {
       ctx,
     )
     expect(kinds(m)).toEqual([
+      'record_evidence',
       'comment',
       'set_state',
       'stop_agent',
@@ -407,10 +415,14 @@ describe('decide: review', () => {
     const a = decide(
       r(),
       facts({ agent: 'idle', linearKey: 'inReview', pr: pr({ state: 'MERGED', mergeSha: 'm1' }) }),
-      { ...ctx, tracksDeploy: true },
+      { ...ctx, tracksDeploy: true, tracksVerification: true, deliveryMode: 'staging' },
     )
-    expect(find(a, 'set_state')?.state).toBe('done')
-    expect(find(a, 'set_phase')).toMatchObject({ phase: 'merged', roundStartSha: 'm1' })
+    expect(find(a, 'set_state')?.state).toBe('inReview')
+    expect(find(a, 'set_phase')).toMatchObject({
+      phase: 'merged',
+      roundStartSha: 'm1',
+      roundStartedAt: NOW,
+    })
     expect(find(a, 'comment')?.body).toContain('deploy')
   })
   it('starts a review round from review comments and Linear comments', () => {
@@ -455,6 +467,26 @@ describe('decide: review', () => {
       handledCiSha: 'abc123',
     })
   })
+  it('bounds waiting for missing required CI without counting the build duration', () => {
+    const a = decide(
+      r({ roundStartedAt: '2026-10-08T08:00:00.000Z' }),
+      facts({
+        agent: 'idle',
+        pr: pr(),
+        ci: { headSha: 'abc123', failed: [], missing: ['test'], pending: true, passed: false },
+      }),
+      ctx,
+    )
+    expect(find(a, 'set_state')?.state).toBe('needsInput')
+    expect(find(a, 'comment')?.body).toContain('Missing: test')
+    const complete = decide(
+      row({ phase: 'building', round: 1, roundStartedAt: '2026-10-08T06:00:00.000Z' }),
+      facts({ agent: 'done', marker: true, pr: pr() }),
+      ctx,
+    )
+    expect(find(complete, 'set_phase')?.roundStartedAt).toBe(NOW)
+  })
+
   it('waits while the agent works, the slot is taken, or nothing happened', () => {
     const feedback = { comments: [rc], changesRequested: false, cursor: NOW }
     expect(
@@ -489,24 +521,144 @@ describe('decide: review', () => {
   })
 })
 
-describe('decide: merged', () => {
+describe('decide: delivery', () => {
   const m = (over: Partial<IssueRow> = {}) =>
     row({ phase: 'merged', roundStartSha: 'm1', roundStartedAt: NOW, ...over })
-  it('posts the deploy result, or gives up after three hours', () => {
-    const t = { ...ctx, tracksDeploy: true }
+  const t: DecideContext = {
+    ...ctx,
+    deliveryMode: 'staging',
+    tracksDeploy: true,
+    tracksVerification: true,
+  }
+  const run = (over: Partial<WorkflowSnapshot> = {}): WorkflowSnapshot => ({
+    headSha: 'm1',
+    status: 'completed',
+    conclusion: 'success',
+    url: 'https://gh/run/1',
+    runId: 1,
+    attempt: 1,
+    startedAt: '2026-10-08T09:00:00.000Z',
+    completedAt: '2026-10-08T09:10:00.000Z',
+    ...over,
+  })
+  const verified = () =>
+    run({
+      runId: 2,
+      startedAt: '2026-10-08T09:11:00.000Z',
+      completedAt: '2026-10-08T09:15:00.000Z',
+    })
+
+  it('waits for deployment then a separate verification before marking Done', () => {
+    expect(decide(m(), facts({ linearKey: 'inReview' }), t)).toEqual([])
+    const deployed = decide(m(), facts({ staging: run() }), t)
+    expect(find(deployed, 'set_phase')?.phase).toBe('verifying')
+    expect(find(deployed, 'set_state')).toBeUndefined()
     const ok = decide(
-      m(),
-      facts({ linearKey: 'done', staging: { conclusion: 'success', url: 'https://gh/run/1' } }),
+      m({ phase: 'verifying' }),
+      facts({ staging: run(), verification: verified() }),
       t,
     )
-    expect(find(ok, 'comment')?.body).toContain('success')
-    expect(ok.at(-2)).toMatchObject({ kind: 'set_phase', phase: 'closed' })
-    expect(decide(m(), facts({ linearKey: 'done' }), t)).toEqual([])
-    const late = decide(m(), facts({ linearKey: 'done', nowIso: '2026-10-08T13:00:00.000Z' }), t)
-    expect(find(late, 'comment')?.key).toBe('deploy-none-m1')
-    expect(decide(m(), facts({ linearKey: 'done' }), ctx)).toEqual([
-      { kind: 'set_phase', phase: 'closed' },
-    ])
+    expect(find(ok, 'comment')?.body).toContain('Verified on staging: m1')
+    expect(find(ok, 'set_state')?.state).toBe('done')
+    expect(find(ok, 'set_phase')?.phase).toBe('closed')
+    expect(ok).toContainEqual(
+      expect.objectContaining({
+        kind: 'record_evidence',
+        stage: 'delivery',
+        data: expect.objectContaining({ sha: 'm1', outcome: 'verified' }),
+      }),
+    )
+  })
+
+  it('rejects stale revisions and verification before deployment', () => {
+    for (const snapshot of [verified(), run({ headSha: 'other' })]) {
+      const a = decide(
+        m(),
+        facts({ staging: run({ headSha: 'other' }), verification: snapshot }),
+        t,
+      )
+      expect(find(a, 'set_state')).toBeUndefined()
+    }
+    const early = decide(m(), facts({ staging: run(), verification: run() }), t)
+    expect(find(early, 'set_state')).toBeUndefined()
+    const wrong = decide(m(), facts({ staging: run(), verification: verifiedWithWrongSha() }), t)
+    expect(find(wrong, 'set_state')).toBeUndefined()
+  })
+  function verifiedWithWrongSha() {
+    return { ...verified(), headSha: 'old' }
+  }
+
+  it('parks failed, canceled and timed-out delivery in Needs Input', () => {
+    for (const conclusion of ['failure', 'cancelled', 'timed_out', 'skipped']) {
+      const a = decide(m(), facts({ staging: run({ conclusion }) }), t)
+      expect(find(a, 'set_state')?.state).toBe('needsInput')
+      expect(find(a, 'set_phase')?.phase).toBe('delivery_failed')
+    }
+    const badVerify = decide(
+      m(),
+      facts({ staging: run(), verification: { ...verified(), conclusion: 'failure' } }),
+      t,
+    )
+    expect(find(badVerify, 'set_phase')?.phase).toBe('delivery_failed')
+    const late = decide(m(), facts({ nowIso: '2026-10-08T13:00:00.000Z' }), t)
+    expect(find(late, 'comment')?.body).toContain('180 minutes')
+    expect(find(late, 'set_state')?.state).toBe('needsInput')
+  })
+
+  it('retries delivery observations after an answer without resuming the coding agent', () => {
+    const a = decide(
+      m({ phase: 'delivery_failed' }),
+      facts({ undelivered: [comment()], agent: 'vm-down' }),
+      t,
+    )
+    expect(kinds(a)).toEqual(['acknowledge', 'set_state', 'set_phase', 'event'])
+    expect(find(a, 'set_phase')).toMatchObject({ phase: 'merged', roundStartedAt: NOW })
+    expect(
+      decide(
+        m({ phase: 'delivery_failed' }),
+        facts({ linearKey: 'needsInput', humanMoved: false }),
+        t,
+      ),
+    ).toEqual([])
+    const moved = decide(
+      m({ phase: 'delivery_failed' }),
+      facts({ linearKey: 'ready', humanMoved: true }),
+      t,
+    )
+    expect(find(moved, 'set_phase')?.phase).toBe('merged')
+  })
+
+  it('dispatches verification once after deployment and waits while its intent is recorded', () => {
+    const action = decide(m(), facts({ staging: run(), verificationRequested: false }), t)
+    expect(find(action, 'verify_staging')).toEqual({
+      kind: 'verify_staging',
+      sha: 'm1',
+      deploymentRunId: 1,
+      deploymentAttempt: 1,
+    })
+    const pending = decide(
+      m({ phase: 'verifying' }),
+      facts({ staging: run(), verificationRequested: true }),
+      t,
+    )
+    expect(find(pending, 'verify_staging')).toBeUndefined()
+  })
+
+  it('requires staging workflow configuration before dispatch and after an external merge', () => {
+    const invalid = { ...t, tracksVerification: false }
+    expect(find(decide(row(), facts(), invalid), 'set_state')?.state).toBe('needsInput')
+    expect(kinds(decide(row(), facts(), invalid))).not.toContain('dispatch')
+    expect(find(decide(m(), facts(), invalid), 'set_phase')?.phase).toBe('delivery_failed')
+    expect(find(decide(m({ roundStartSha: null }), facts(), t), 'set_phase')?.phase).toBe(
+      'delivery_failed',
+    )
+  })
+
+  it('labels explicit merge-only completion without claiming staging was verified', () => {
+    const a = decide(m(), facts(), ctx)
+    expect(find(a, 'comment')?.body).toContain('staging was not verified')
+    expect(find(a, 'set_state')?.state).toBe('done')
+    expect(find(a, 'set_phase')?.phase).toBe('closed')
   })
 })
 
@@ -629,6 +781,10 @@ describe('decide: automated review and merge', () => {
   it('asks for help when the branch conflicts', () => {
     const a = decide(reviewed(), quiet({ pr: pr({ mergeable: 'CONFLICTING' }) }), ctx)
     expect(find(a, 'comment')?.key).toBe('conflict-abc123')
+  })
+  it('waits while another issue of the repo is between merge and verified delivery', () => {
+    expect(decide(reviewed(), quiet({ deliveryBusy: true }), ctx)).toEqual([])
+    expect(decide(reviewed(), quiet(), ctx).map((a) => a.kind)).toEqual(['merge'])
   })
   it('attempts a merge at most once per head and flags one that never finished', () => {
     expect(

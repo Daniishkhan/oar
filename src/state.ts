@@ -82,6 +82,8 @@ export type AgentStatus = (typeof AgentStatuses)[number]
 
 export const HerdrHandle = z.object({
   runner: z.literal('herdr'),
+  agentKind: z.enum(['claude', 'codex']).optional(),
+  agentModel: z.string().optional(),
   workspaceId: z.string(),
   tabId: z.string().optional(),
   paneId: z.string(),
@@ -103,6 +105,9 @@ export type PrInfo = z.infer<typeof PrSchema>
 
 export const TaskSchema = z.object({
   id: z.string(),
+  /** Pinned before remote launch so configuration changes cannot relabel a running agent. */
+  agentKind: z.enum(['claude', 'codex']).optional(),
+  agentModel: z.string().optional(),
   repo: z.string(),
   slug: z.string(),
   branch: z.string(),

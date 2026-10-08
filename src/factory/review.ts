@@ -10,19 +10,23 @@ export type ReviewRunner = 'codex' | 'claude'
 
 const SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
 
-const FindingSchema = z.object({
-  severity: z.enum(SEVERITIES),
-  file: z.string().default(''),
-  line: z.number().int().nullable().optional(),
-  title: z.string(),
-  detail: z.string().default(''),
-  fix: z.string().nullable().optional(),
-})
+const FindingSchema = z
+  .object({
+    severity: z.enum(SEVERITIES),
+    file: z.string(),
+    line: z.number().int().nullable(),
+    title: z.string().min(1),
+    detail: z.string(),
+    fix: z.string().nullable(),
+  })
+  .strict()
 
-export const ReviewOutputSchema = z.object({
-  summary: z.string().default(''),
-  findings: z.array(FindingSchema).default([]),
-})
+export const ReviewOutputSchema = z
+  .object({
+    summary: z.string(),
+    findings: z.array(FindingSchema),
+  })
+  .strict()
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>
 
 /** The JSON Schema handed to the runner. Strict: Codex's structured output wants every key required. */
@@ -132,7 +136,7 @@ export function reviewCommand(
   const pre = `export PATH="$HOME/.local/bin:$PATH"; cd ${shq(o.cwd)} && rm -f ${shq(out)} && timeout ${o.timeoutSeconds}s`
   if (runner === 'codex')
     return `${pre} codex exec -C ${shq(o.cwd)} -s read-only --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral --color never -c model_reasoning_effort=high${o.model ? ` -m ${shq(o.model)}` : ''} --output-schema ${shq(schema)} -o ${shq(out)} - < ${shq(prompt)} > ${shq(log)} 2>&1`
-  return `${pre} claude -p --restricted --strict-mcp-config --add-dir ${shq(dir)} --output-format json --json-schema "$(cat ${shq(schema)})"${o.model ? ` --model ${shq(o.model)}` : ''} < ${shq(prompt)} > ${shq(out)} 2> ${shq(log)}`
+  return `${pre} claude -p --restricted --tools Read,Glob,Grep --strict-mcp-config --add-dir ${shq(dir)} --output-format json --json-schema "$(cat ${shq(schema)})"${o.model ? ` --model ${shq(o.model)}` : ''} < ${shq(prompt)} > ${shq(out)} 2> ${shq(log)}`
 }
 
 const stripFences = (text: string) =>
@@ -145,6 +149,8 @@ const stripFences = (text: string) =>
 export function parseReviewOutput(runner: ReviewRunner, text: string): ReviewOutput {
   let value: unknown = JSON.parse(stripFences(text))
   if (runner === 'claude') {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new Error('claude: expected a structured response envelope')
     const env = value as { structured_output?: unknown; result?: unknown; is_error?: boolean }
     if (env.is_error) throw new Error(`claude: ${String(env.result ?? 'error')}`)
     value =

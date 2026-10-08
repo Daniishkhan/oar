@@ -54,34 +54,115 @@ describe('inferRepo', () => {
 })
 
 describe('backfillRepoDefaults', () => {
-  it('moves a stored cno config onto dev with the staging workflow, leaving engine alone', () => {
+  it('brings a stored config up to the shipped delivery defaults without touching unknown repos', () => {
     const stored = ConfigSchema.parse({
       ...DEFAULT_CONFIG,
       repos: {
-        engine: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'release' },
-        cno: { ...DEFAULT_CONFIG.repos.cno!, baseBranch: 'main', deployWorkflow: undefined },
-        other: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'trunk' },
+        engine: {
+          ...DEFAULT_CONFIG.repos.engine!,
+          baseBranch: 'release',
+          requiredChecks: [],
+          deliveryMode: undefined,
+        },
+        cno: {
+          ...DEFAULT_CONFIG.repos.cno!,
+          baseBranch: 'main',
+          deployWorkflow: undefined,
+          requiredChecks: [],
+        },
+        other: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'trunk', requiredChecks: [] },
       },
     })
     expect(backfillRepoDefaults(stored)).toEqual([
+      'engine.requiredChecks = Verify, Integration tests, End-to-end tests, Package and drive the desktop app',
+      'engine.deliveryMode = merge (no staging)',
       'cno.deployWorkflow = staging.yml',
       'cno.baseBranch main → dev',
+      'cno.requiredChecks = checks',
     ])
-    expect(stored.repos.cno).toMatchObject({ baseBranch: 'dev', deployWorkflow: 'staging.yml' })
-    expect(stored.repos.engine?.baseBranch).toBe('release')
-    expect(stored.repos.other?.baseBranch).toBe('trunk')
+    expect(stored.repos.cno).toMatchObject({
+      baseBranch: 'dev',
+      deployWorkflow: 'staging.yml',
+      requiredChecks: ['checks'],
+      deliveryMode: 'staging',
+    })
+    expect(stored.repos.engine).toMatchObject({ baseBranch: 'release', deliveryMode: 'merge' })
+    expect(stored.repos.other).toMatchObject({ baseBranch: 'trunk', requiredChecks: [] })
     expect(backfillRepoDefaults(stored)).toEqual([])
     expect(backfillRepoDefaults(ConfigSchema.parse(DEFAULT_CONFIG))).toEqual([])
+  })
+  it('keeps an explicit staging choice for a repo whose default is merge-only', () => {
+    const stored = ConfigSchema.parse({
+      ...DEFAULT_CONFIG,
+      repos: {
+        engine: {
+          ...DEFAULT_CONFIG.repos.engine!,
+          deliveryMode: 'staging',
+          deployWorkflow: 'deploy.yml',
+          verifyWorkflow: 'verify.yml',
+        },
+      },
+    })
+    expect(backfillRepoDefaults(stored)).toEqual([])
+    expect(stored.repos.engine?.deliveryMode).toBe('staging')
   })
   it('defaults the review and merge settings', () => {
     const c = ConfigSchema.parse(DEFAULT_CONFIG)
     expect(c.factory.review).toEqual({
       runner: 'codex',
+      isolation: 'sandbox',
       timeoutMinutes: 15,
       maxRounds: 3,
       blocking: ['P0', 'P1'],
     })
     expect(c.factory.holdLabel).toBe('hold')
-    expect(c.repos.cno).toMatchObject({ autoMerge: true, mergeMethod: 'squash' })
+    expect(c.factory.deliveryTimeoutMinutes).toBe(180)
+    expect(c.repos.engine).toMatchObject({
+      requiredChecks: [
+        'Verify',
+        'Integration tests',
+        'End-to-end tests',
+        'Package and drive the desktop app',
+      ],
+      deliveryMode: 'merge',
+      buildRunner: 'claude',
+    })
+    expect(c.repos.cno).toMatchObject({
+      autoMerge: true,
+      mergeMethod: 'squash',
+      requiredChecks: ['checks'],
+      deliveryMode: 'staging',
+    })
+  })
+})
+
+describe('delivery configuration', () => {
+  it('requires distinct deployment and verification workflows', () => {
+    expect(() =>
+      ConfigSchema.parse({
+        ...DEFAULT_CONFIG,
+        repos: {
+          engine: {
+            ...DEFAULT_CONFIG.repos.engine,
+            deployWorkflow: 'staging.yml',
+            verifyWorkflow: 'staging.yml',
+          },
+        },
+      }),
+    ).toThrow('verifyWorkflow must be separate')
+  })
+  it('rejects empty required check names and nonpositive delivery timeouts', () => {
+    expect(() =>
+      ConfigSchema.parse({
+        ...DEFAULT_CONFIG,
+        repos: { engine: { ...DEFAULT_CONFIG.repos.engine, requiredChecks: [''] } },
+      }),
+    ).toThrow()
+    expect(() =>
+      ConfigSchema.parse({
+        ...DEFAULT_CONFIG,
+        factory: { ...DEFAULT_CONFIG.factory, deliveryTimeoutMinutes: 0 },
+      }),
+    ).toThrow()
   })
 })

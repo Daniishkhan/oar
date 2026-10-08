@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readPlanFile, ticketCreate, ticketDryRun } from '../../src/commands/ticket.js'
 import type { LinearClient } from '../../src/factory/linear.js'
+import { publishPlan } from '../../src/factory/publication.js'
 import {
   EXAMPLE_PLAN,
   orderTickets,
@@ -39,6 +40,17 @@ class FakeLinear {
   >()
   private n = 0
   failOnCreate: string | null = null
+  failAfterCreate: string | null = null
+  failAfterRelation = false
+  beforeCreate: ((input: { id?: string; title: string }) => void) | undefined
+  relations = new Map<
+    string,
+    { id: string; issueId: string; relatedIssueId: string; type: string }
+  >()
+  private displayId(id?: string): string {
+    if (!id) return '-'
+    return `id-${[...this.issues.values()].find((i) => i.id === id)?.identifier ?? id}`
+  }
   async teams(keys: string[]) {
     return keys.includes('CNO') ? [{ id: 'team-cno', key: 'CNO', name: 'CNO' }] : []
   }
@@ -54,16 +66,19 @@ class FakeLinear {
     return this.labels.has(name) ? `label-${name}` : null
   }
   async createIssue(input: {
+    id?: string
     title: string
     description: string
     stateId?: string
     parentId?: string
     labelIds?: string[]
   }) {
+    this.beforeCreate?.(input)
     if (this.failOnCreate === input.title) throw new Error('boom')
+    if ([...this.issues.values()].some((i) => i.id === input.id)) throw new Error('duplicate UUID')
     const identifier = `CNO-${++this.n}`
     const issue = {
-      id: `id-${identifier}`,
+      id: input.id ?? `id-${identifier}`,
       identifier,
       title: input.title,
       url: `https://linear.app/x/${identifier}`,
@@ -71,19 +86,40 @@ class FakeLinear {
     }
     this.issues.set(identifier, issue)
     this.calls.push(
-      `create ${identifier} ${input.title} state=${input.stateId} parent=${input.parentId ?? '-'} labels=${(input.labelIds ?? []).join(',') || '-'}`,
+      `create ${identifier} ${input.title} state=${input.stateId} parent=${this.displayId(input.parentId)} labels=${(input.labelIds ?? []).join(',') || '-'}`,
     )
+    if (this.failAfterCreate === input.title) {
+      this.failAfterCreate = null
+      throw new Error('response lost after create')
+    }
     return issue
   }
   async issue(identifier: string) {
-    const i = this.issues.get(identifier)
+    const i =
+      this.issues.get(identifier) ??
+      [...this.issues.values()].find((issue) => issue.id === identifier)
     return i ? { ...i, parentId: null } : null
   }
-  async createRelation(input: { issueId: string; relatedIssueId: string; type: string }) {
-    this.calls.push(`relate ${input.issueId} ${input.type} ${input.relatedIssueId}`)
+  async relation(id: string) {
+    return this.relations.get(id) ?? null
+  }
+  async createRelation(input: {
+    id?: string
+    issueId: string
+    relatedIssueId: string
+    type: string
+  }) {
+    if (input.id) this.relations.set(input.id, { ...input, id: input.id })
+    this.calls.push(
+      `relate ${this.displayId(input.issueId)} ${input.type} ${this.displayId(input.relatedIssueId)}`,
+    )
+    if (this.failAfterRelation) {
+      this.failAfterRelation = false
+      throw new Error('relation response lost')
+    }
   }
   async updateIssue(id: string, input: { description?: string }) {
-    this.calls.push(`update ${id}`)
+    this.calls.push(`update ${this.displayId(id)}`)
     const i = [...this.issues.values()].find((x) => x.id === id)
     if (i && input.description) i.description = input.description
   }
@@ -93,7 +129,7 @@ describe('plan files', () => {
   it('accepts the shipped example and orders tickets by dependency', () => {
     const plan = PlanFileSchema.parse(EXAMPLE_PLAN)
     expect(orderTickets(plan.tickets).map((t) => t.key)).toEqual(['request-id', 'slow-requests'])
-    const swapped = { ...EXAMPLE_PLAN, tickets: [...EXAMPLE_PLAN.tickets].reverse() }
+    const swapped = { ...EXAMPLE_PLAN, tickets: EXAMPLE_PLAN.tickets.toReversed() }
     expect(orderTickets(PlanFileSchema.parse(swapped).tickets).map((t) => t.key)).toEqual([
       'request-id',
       'slow-requests',
@@ -260,6 +296,7 @@ describe('oar ticket create', () => {
     linear.labels.clear()
     const plan = readPlanFile(path)
     plan.tickets[1]!.labels = ['perf']
+    writeFileSync(path, JSON.stringify(plan))
     await ticketCreate(w.ctx, path, plan, linear as unknown as LinearClient)
     expect(linear.calls[1]).toContain('labels=-')
     const notes = w.out.join('\n')
@@ -290,5 +327,165 @@ describe('oar ticket create', () => {
     writeFileSync(path, JSON.stringify({ team: 'cno', tickets: [] }))
     expect(() => readPlanFile(path)).toThrow(/team: a Linear team key[\s\S]*tickets/)
     void w
+  })
+
+  it('persists publication and all operation IDs before the first remote mutation', async () => {
+    const { w, path, linear } = setup()
+    linear.beforeCreate = (input) => {
+      const saved = readPlanFile(path)
+      expect(saved.publication?.id).toMatch(/^[0-9a-f-]{36}$/)
+      expect(saved.publication?.contentHash).toMatch(/^[a-f0-9]{64}$/)
+      expect(saved.publication?.operations.relations['request-id>slow-requests']).toBeTruthy()
+      expect([
+        saved.publication?.operations.plan,
+        ...Object.values(saved.publication!.operations.tickets),
+      ]).toContain(input.id)
+    }
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    const saved = readPlanFile(path)
+    expect(linear.issues.get('CNO-2')!.description).toContain(saved.publication!.contentHash)
+    expect(existsSync(`${path}.publish.lock`)).toBe(false)
+  })
+
+  it('recovers a created issue after the response was lost, using its persisted UUID', async () => {
+    const { w, path, linear } = setup()
+    linear.failAfterCreate = 'Return an X-Request-ID header on every API response'
+    await expect(
+      ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient),
+    ).rejects.toThrow('response lost')
+    expect(readPlanFile(path).created.tickets).toEqual({})
+    const operationId = readPlanFile(path).publication!.operations.tickets['request-id']
+    expect(linear.issues.get('CNO-2')!.id).toBe(operationId)
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    expect(linear.issues.size).toBe(3)
+    expect(linear.calls.filter((c) => c.startsWith('create'))).toHaveLength(3)
+    expect(readPlanFile(path).created.tickets['request-id']).toBe('CNO-2')
+  })
+
+  it('recovers a relation after the response was lost without creating it twice', async () => {
+    const { w, path, linear } = setup()
+    linear.failAfterRelation = true
+    await expect(
+      ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient),
+    ).rejects.toThrow('relation response lost')
+    expect(readPlanFile(path).created.relations).toEqual([])
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    expect(linear.calls.filter((c) => c.startsWith('relate'))).toHaveLength(1)
+    expect(readPlanFile(path).created.relations).toEqual(['request-id>slow-requests'])
+  })
+
+  it('rejects changed published content before calling Linear and explains revision workflow', async () => {
+    const { w, path, linear } = setup()
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    const saved = readPlanFile(path)
+    saved.tickets[0]!.goal = 'A new goal'
+    writeFileSync(path, JSON.stringify(saved))
+    linear.calls = []
+    await expect(
+      ticketCreate(w.ctx, path, saved, linear as unknown as LinearClient),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('immutable'),
+      hint: expect.stringContaining('plans/<slug>-v2'),
+    })
+    expect(linear.calls).toEqual([])
+  })
+
+  it('publishes the exact local Markdown snapshot and refuses changes on resume', async () => {
+    const { w, path, linear } = setup()
+    const plan = readPlanFile(path)
+    plan.document = 'plan.md'
+    writeFileSync(
+      join(w.home, 'plan.md'),
+      '# Draft design\n\nUnpushed but fully available to the worker.\n',
+    )
+    writeFileSync(path, JSON.stringify(plan))
+    await ticketCreate(w.ctx, path, plan, linear as unknown as LinearClient)
+    for (const issue of linear.issues.values()) {
+      expect(issue.description).toContain('Unpushed but fully available to the worker.')
+      expect(issue.description).toContain('not a Git commit')
+    }
+    writeFileSync(join(w.home, 'plan.md'), '# Different design')
+    await expect(
+      ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient),
+    ).rejects.toThrow('immutable')
+  })
+
+  it('locks concurrent publishers and reloads receipts inside the lock', async () => {
+    const { w, path, linear } = setup()
+    let unlock!: () => void
+    let entered!: () => void
+    const started = new Promise<void>((r) => {
+      entered = r
+    })
+    const wait = new Promise<void>((r) => {
+      unlock = r
+    })
+    const teams = linear.teams.bind(linear)
+    linear.teams = async (keys) => {
+      entered()
+      await wait
+      return teams(keys)
+    }
+    const stalePlan = readPlanFile(path)
+    const first = publishPlan({ path, linear: linear as unknown as LinearClient })
+    await started
+    await expect(publishPlan({ path, linear: linear as unknown as LinearClient })).rejects.toThrow(
+      'locked',
+    )
+    unlock()
+    await first
+    await ticketCreate(w.ctx, path, stalePlan, linear as unknown as LinearClient)
+    expect(linear.issues.size).toBe(3)
+    expect(existsSync(`${path}.publish.lock`)).toBe(false)
+  })
+
+  it('keeps backward-compatible receipts and adopts unchanged legacy issue definitions', async () => {
+    const { w, path, linear } = setup()
+    const plan = readPlanFile(path)
+    const p = await linear.createIssue({
+      title: plan.plan!.title,
+      description: renderPlan(plan.plan!, []),
+    })
+    const t = plan.tickets[0]!
+    const first = await linear.createIssue({
+      title: t.title,
+      description: renderTicket(t, { plan: { ...p, title: plan.plan!.title } }),
+    })
+    plan.created.plan = p.identifier
+    plan.created.tickets[t.key] = first.identifier
+    writeFileSync(path, JSON.stringify(plan))
+    linear.calls = []
+    await ticketCreate(w.ctx, path, plan, linear as unknown as LinearClient)
+    expect(linear.issues.size).toBe(3)
+    expect(readPlanFile(path).publication!.operations.tickets[t.key]).toBe(first.id)
+    expect(w.out.join(' ')).toContain('adopted legacy')
+  })
+
+  it('preserves an editor change made during an uncertain remote write', async () => {
+    const { w, path, linear } = setup()
+    linear.beforeCreate = () => {
+      const edited = readPlanFile(path)
+      edited.tickets[0]!.goal = 'An edit while publishing'
+      writeFileSync(path, JSON.stringify(edited))
+    }
+    await expect(
+      ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient),
+    ).rejects.toThrow('no local edits were overwritten')
+    expect(readPlanFile(path).tickets[0]!.goal).toBe('An edit while publishing')
+    expect(readPlanFile(path).publication?.operations.plan).toBe(linear.issues.get('CNO-1')!.id)
+    expect(existsSync(`${path}.publish.lock`)).toBe(false)
+  })
+
+  it('does not treat a failed recovery lookup as proof that an issue is missing', async () => {
+    const { w, path, linear } = setup()
+    linear.issue = async () => {
+      throw new Error('lookup unavailable')
+    }
+    await expect(
+      ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient),
+    ).rejects.toThrow('lookup unavailable')
+    expect(linear.issues.size).toBe(0)
+    expect(linear.calls.filter((c) => c.startsWith('create'))).toEqual([])
+    expect(readPlanFile(path).publication?.operations.plan).toBeTruthy()
   })
 })

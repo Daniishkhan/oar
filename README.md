@@ -4,12 +4,13 @@ Remote coding agents on [boat.dev](https://boat.dev) VMs, from a one-off task to
 factory. oar has two layers:
 
 - **The CLI** gives one developer a long-lived VM per repo with the
-  [Herdr](https://herdr.dev) server on it. Claude Code tasks are dispatched into Herdr panes and
-  tracked to draft PRs. Close the lid; the agents keep going, and you can steer them from the
-  Claude phone app through Remote Control.
-- **The factory** is an always-on controller VM that turns Linear issues into merged PRs. Move
-  an issue to Todo and an agent builds it, CI runs, an automated reviewer checks the PR, and a
-  clean review merges it. Your only step is validating on staging. See
+  [Herdr](https://herdr.dev) server on it. Claude Code or Codex tasks run in Herdr panes and are tracked to draft PRs.
+  Close the lid; the agents keep going. Claude sessions additionally support the Claude phone
+  app through Remote Control.
+- **The factory** is an always-on controller VM that turns Linear issues into verified staging
+  changes. Move an issue to the configured ready state and an agent builds it, CI and an
+  independent reviewer check the PR, then the controller merges, waits for deployment, and
+  requires staging acceptance checks for the same revision. See
   [Factory](#factory-linear--agents-no-mac-in-the-loop).
 
 ```
@@ -23,22 +24,25 @@ oar status               # every VM and task on one screen
 
 ## How it fits together
 
-| Where       | What                                                                                          |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| Mac         | `oar` (this CLI), `herdr` client, `~/.claude/skills/oar` so Claude can hand work off          |
-| VM `engine` | `/home/user/nodes-engine`, Herdr server (systemd), Claude Code logged in with the Max plan    |
-| VM `cno`    | `/home/user/nodes-cno`, same                                                                  |
-| Phone       | Claude app → Code tab: every dispatched task is a Remote Control session named after the task |
+| Where       | What                                                                                                            |
+| ----------- | --------------------------------------------------------------------------------------------------------------- |
+| Mac         | `oar` (this CLI), `herdr` client, skills for Claude (`~/.claude/skills/oar`) and Codex (`~/.agents/skills/oar`) |
+| VM `engine` | `/home/user/nodes-engine`, Herdr server (systemd), Claude Code logged in with the Max plan                      |
+| VM `cno`    | `/home/user/nodes-cno`, same                                                                                    |
+| Phone       | Linear for factory progress and questions; Claude Remote Control for Claude sessions                            |
 
 A task = a brief (`~/.local/state/oar/tasks/<id>/brief.md`) + a branch `codex/<slug>` + a git
-worktree `/home/user/worktrees/<repo>/<slug>` + a Herdr pane running `claude --name <id>
---remote-control <id>`. oar appends a footer to the brief with the gate and the finish steps
+worktree `/home/user/worktrees/<repo>/<slug>` + a Herdr pane running the configured `buildRunner` (`claude` by default, or `codex`) and
+optional `buildModel`. Both currently use Herdr terminal sessions. oar appends a footer with the gate and finish steps
 (push, `gh pr create --draft`, `touch …/done`). Status is derived from three signals: Herdr's
 agent state, the PR on GitHub, and the done marker on the VM.
 
 ## Setup
 
-1. `pnpm install && pnpm install:local` (links `~/.local/bin/oar`, copies the skill).
+1. `pnpm install && pnpm install:local` links `~/.local/bin/oar` and copies the skill into
+   `~/.claude/skills/oar` and `~/.agents/skills/oar`. An existing regular executable is never
+   replaced; move it aside explicitly if necessary. To smoke-test without a real install:
+   `pnpm build && node scripts/install-local.mjs --home /tmp/oar-install-test`.
 2. `~/.config/oar/env` with `BOAT_API_KEY=boat_…` (mode 600). `~/.config/oar/config.json` is
    written with the shipped defaults on first run; edit repos there.
 3. In the boat dashboard: connect GitHub and install boat's GitHub App on the organisation, then
@@ -52,11 +56,11 @@ agent state, the PR on GitHub, and the done marker on the VM.
 was stopped overnight, running processes are gone: `pnpm db:up` again, `claude --continue` in a
 pane. Suspended tasks are resumed automatically.
 
-**Hand off and close the lid.** From a Claude session: "hand this off to the VM" → the `oar`
+**Hand off and close the lid.** From a Claude or Codex planning session: "hand this off to the VM" → the `oar`
 skill writes the brief, runs `oar task new` + `oar task dispatch`, and tells you the id. Or by
 hand: `oar task new <slug> --repo cno --hours 8`, edit the brief, `oar task dispatch <slug>`.
 Run `oar watch` in a Herdr pane on the Mac (or leave it; `oar status` in the morning). Close the
-lid. On the phone, the task shows in the Claude app's Code tab; you get pushes when it finishes
+lid. For Claude workers, the task shows in the Claude app's Code tab; you get pushes when it finishes
 or needs you. Morning: the draft PR is on GitHub; `oar task status <id> --read 30` for the tail.
 
 **Blocked.** `oar task status <id>` exits 3 and prints the dialog. `oar task keys <id> enter` (or
@@ -88,17 +92,19 @@ Linear and GitHub and drives the worker VMs with the same code the CLI uses:
 
 - A Linear issue moved to the trigger state (`factory.linear.states.ready`, default **Ready**;
   team `ENG` → engine, `CNO` → cno; `factory.linear.teams`) becomes an oar task: brief from the issue and its comments, branch `codex/<team>-<n>-<slug>`,
-  a Claude pane on the repo VM. The controller comments "Started…" and moves the card to
+  a Claude or Codex pane on the repo VM (`buildRunner`/`buildModel`). The controller comments "Started…" and moves the card to
   **In Progress**.
 - The agent asks by writing `question.md` next to its brief and stopping: the question lands on
   the issue (**Needs Input**), your reply is sent back as the next prompt. Any comment on an
   active issue reaches the agent (steered while it works, prompted when it waits).
 - A draft PR with new commits moves the card to **In Review**; review comments, a
-  changes-requested review and red CI come back as numbered rounds; a merge moves it to **Done**
-  (nodes-cno: the staging workflow result is posted first). Canceling stops the agent.
+  changes-requested review and red CI come back as numbered rounds. After merge, staging delivery
+  waits for a successful deployment and separate acceptance workflow on the exact merged SHA;
+  only then does the card become **Done**. Failures, missing evidence, and timeouts remain
+  unresolved. Canceling stops the agent.
 - Once the PR's checks are green and nobody has commented, an automated reviewer (Codex by
-  default, `factory.review`) reads the head commit in a detached worktree on the repo VM,
-  read-only, and posts its findings on the PR and the issue. It checks every functional and
+  default, `factory.review`) reads the head commit in a fresh sandbox from the dedicated
+  `reviewEnvName` environment, read-only, and posts its findings on the PR and the issue. It checks every functional and
   non-functional criterion a ticket lists; an unmet one is P1, and the builder lists how it met
   each one in the PR body. P0/P1 findings (`review.blocking`)
   go back to the agent as a review round, at most `review.maxRounds` times; a clean review merges
@@ -113,30 +119,165 @@ Linear and GitHub and drives the worker VMs with the same code the CLI uses:
 Identity: an OAuth application in Linear ("oar", client credentials enabled) so its comments are
 its own and notify you; `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` in `~/.config/oar/env`
 (`LINEAR_API_KEY` works as a fallback, without notifications). Per Linear team, set the GitHub
-PR automation to _merged → Done_ only.
+PR automation so a merge does **not** mark an issue Done. The controller owns completion
+after delivery verification; an independent Linear automation must not bypass it.
 
-Tickets come from a planning session: Claude, using the oar skill's
-[tickets.md](skill/tickets.md), writes the approved plan as a JSON file and `oar ticket create`
-turns it into a parent issue labelled `spec`, which the controller never builds, and one
-sub-issue per ticket in Backlog. Each ticket has Goal, Jobs to be done, Functional and
-Non-functional criteria, Scope, Decisions and a Staging check, and "blocked by" links set the
-order. A ticket's brief includes its parent plan.
+Tickets come from a local planning session with Claude or Codex using the oar skill's
+[tickets.md](skill/tickets.md). The plan is saved as `plan.md` and `tickets.json` under
+`~/.local/state/oar/plans/<slug>/` (in the repository only when its documentation policy allows),
+with `"document": "plan.md"` in the JSON. Publishing creates a parent
+issue labelled `spec`, one Backlog issue per task, and dependency links. The plan's full Markdown
+snapshot and content hash are embedded in each task, so workers can read unpushed planning
+content. Required code dependencies still need to be pushed.
+
+`oar ticket create` saves stable publication and per-operation UUIDs before writing to Linear.
+It reconciles those IDs after lost responses, writes receipts atomically, and locks concurrent
+publishers of the same file. Keep the generated `created` and `publication` fields with the
+plan. The publisher never commits or pushes. Published content is immutable: copy the
+files to a new revision directory and remove those generated fields to publish changed scope;
+explicitly retire superseded issues. See the ticket skill for recovery of a stale lock.
 
 ```bash
-oar ticket check plan.json   # validate and show the rendered tickets
-oar ticket create plan.json  # plan issue + tickets in Backlog; ids written back, a re-run resumes
-oar factory setup            # controller VM, bundle, tailnet, worker keys + Herdr profiles, states, service
-oar factory status           # phases per issue, VMs, last tick (forwarded over ssh)
-oar factory log ENG-12 -f    # the controller's event log
-oar factory attach ENG-12    # Herdr on the issue's agent
-oar factory pause|resume     # hold new dispatches (running issues continue)
-oar factory deploy           # after changing oar or its config: rebuild, copy bundle + config, restart
+oar ticket check <plan>/tickets.json   # validate and preview the snapshot; no writes
+oar ticket create <plan>/tickets.json  # publish to Backlog; safe to resume
+oar factory check           # local rollout gate: staging/review configuration
+oar factory setup           # validate config; controller VM, bundle, tailnet, worker keys, states, service
+oar factory status          # phases per issue, VMs, last tick (forwarded over ssh)
+oar factory evidence ENG-12 # JSON delivery record: plan, commits, checks, review and workflows
+oar factory log ENG-12 -f   # the controller's event log
+oar factory attach ENG-12   # Herdr on the issue's builder
+oar factory pause|resume    # hold new dispatches (running issues continue)
+oar factory deploy          # validate, rebuild, copy bundle + config, restart
 ```
 
 State on the controller: `~/.local/state/oar/state.json` (tasks, VMs) and `factory.sqlite`
-(issues, rounds, reviews, merge attempts, comment delivery, idempotency keys, events). Its
-config is the Mac's, copied by `setup` and `deploy`; both bring a stored repo entry up to the
-shipped defaults first (nodes-cno: base `dev`, deploy workflow `staging.yml`).
+(issues, rounds, reviews, merge attempts, operation IDs, evidence, comments, and events).
+The database records execution facts; Linear carries backlog priority and human-facing progress.
+A process lease prevents two controllers from working against the same state. Keep consistent
+SQLite backups as part of controller operations; copying a live database file alone can miss WAL data.
+Config is copied from the Mac by `setup` and `deploy`; neither command invents application CI
+check names, staging workflows, or a reviewer environment.
+
+### Interfaces and ownership
+
+| Boundary                              | Interface and owner                                                              |
+| ------------------------------------- | -------------------------------------------------------------------------------- |
+| Local planning and status             | Claude/Codex skill invokes the oar CLI; optional Linear MCP for conversation     |
+| Plans and acceptance criteria         | Versioned repository files plus the published content snapshot                   |
+| Backlog and human discussion          | Linear; the controller uses its GraphQL API                                      |
+| Runs, attempts, retries, and receipts | One oar controller with SQLite                                                   |
+| Sandbox lifecycle                     | Boat SDK; implementation and review environments are separate                    |
+| GitHub and delivery                   | `gh` structured output, GitHub checks, and application CI/CD                     |
+| Agent execution                       | Claude or Codex runner through Herdr; headless SDK migration remains future work |
+
+MCP is useful for conversational access. It does not replace the controller's durable operations
+or give workers permission to merge or deploy. The publisher is a reusable application service;
+a future oar MCP adapter can call it without reimplementing publication. Keep Linear as the
+backlog rather than synchronizing a second equivalent tracker.
+
+### Configure a repository for staging delivery
+
+Merge these fields into the existing `repos.<key>` entry in `~/.config/oar/config.json`:
+
+```json
+{
+  "buildRunner": "claude",
+  "requiredChecks": ["lint", "unit-tests"],
+  "deliveryMode": "staging",
+  "deployWorkflow": "staging.yml",
+  "verifyWorkflow": "staging-verify.yml",
+  "reviewEnvName": "my-app-review"
+}
+```
+
+The check names and environment above are examples: use the actual required status/check names
+and Boat environment for the application. Each configured expected check must be present and successful
+for the reviewed commit; canceled, skipped, neutral, pending, or missing checks do not count as
+success. With `requiredChecks: []`, every observed check must succeed. An explicit list is
+recommended because it also detects required checks that never reported. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
+choose `"deliveryMode": "merge"`; that is a different completion contract.
+
+For sandbox review, `reviewEnvName` must differ from the builder's `envName`. Prepare that Boat
+environment with `git`, `gh`, the selected reviewer CLI, a reviewer model credential, and a
+GitHub credential restricted to reading the repository. Set the environment's forwarding flags
+explicitly: `passGithub=false`, `passSandboxCredentials=false`, and
+`passAgentsCredentials=true` for the chosen reviewer. Enable `passSecrets=true` only to supply
+a separately scoped, read-only `GH_TOKEN`; that environment's secrets must contain no builder,
+production, or deployment credentials. Empty Boat environments default these forwarding flags
+to true, so a different environment name alone does not isolate credentials.
+Before running reviewer commands, the controller checks that the environment exists, rejects
+GitHub/sandbox credential forwarding, and confirms that the sandbox uses the inspected environment
+version. It also recovers cleanup of stale review sandboxes after interruption.
+Builder setup scripts are not used to provision reviewers.
+`factory.review.isolation` defaults to `"sandbox"`; `"worktree"` is an explicit
+compatibility mode that shares the builder VM. Select a different `factory.review.runner`
+(and optional `model`) from the builder for independent review.
+
+`oar factory check` validates local rollout configuration; both `factory setup` and
+`factory deploy` refuse incomplete configuration. Local validation does not establish that cloud credentials or application workflows work;
+validate those against the application before enabling unattended work. The shipped defaults
+carry the required-check lists of the two known repos (nodes-cno `["checks"]`, because its
+`release` job is skipped on PRs and would otherwise count as a failure; nodes-engine its four CI
+jobs) and `deliveryMode: "merge"` for nodes-engine, which has no staging; `setup` and `deploy`
+backfill a stored config that predates these fields. The reviewer environment and the
+verification workflow remain the operator's to configure.
+
+The factory records the builder's provider and explicit model before launching it. Recovery and
+resume preserve that identity even after configuration changes; reviewer independence is checked
+against the recorded builder. Existing handles from the older Claude-only runner retain Claude.
+If an existing agent has no recorded identity, stop that agent before retrying the task.
+
+Each build/review round has the task's `hours` execution budget. Background operations use
+`factory.jobTimeoutMinutes`; late completion cannot revive a failed or canceled run. Moving an
+expired task back to the trigger state grants a fresh round budget once its agent resumes.
+Budget enforcement continues during Linear outages, with failure recorded locally and pending
+comments/state updates retried when the connection recovers.
+
+### Credential boundaries
+
+Builders have full VM access: Claude uses `bypassPermissions`, and Codex uses
+`--sandbox danger-full-access --ask-for-approval never`. The dedicated Boat VM is their execution
+boundary; remote credentials remain scoped to their role. Reviewers retain a read-only runner
+policy in separate sandboxes. Keep the existing builder GitHub connection initially. Boat's GitHub
+toggle injects the connected account's token; it has no documented read-only mode. A custom
+`GH_TOKEN` is supported for a separate reviewer identity. [Boat environment documentation](https://docs.boat.dev/environments).
+
+The recommended credentials below still need to be provisioned:
+
+| Role       | Recommended GitHub access                                                                                                                     |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Builder    | Selected repositories; Contents and Pull requests write for branches and PRs                                                                  |
+| Reviewer   | Separate fine-grained token in the review environment's `GH_TOKEN`; selected repository, Metadata and Contents read only                      |
+| Controller | Its own `GH_TOKEN`; selected repositories, Contents/Pull requests write, Checks/Commit statuses read, Actions write for verification dispatch |
+| Deployment | GitHub Actions environment credentials or OIDC; CNO already uses OIDC. Keep production credentials out of agent VMs                           |
+
+A fine-grained PAT is a practical first step for a solo developer; a GitHub App with short-lived
+installation tokens can replace it later. Limit repository selection and permissions when
+provisioning each token. [GitHub token management](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+### Staging acceptance workflow
+
+[templates/staging-verify.yml](templates/staging-verify.yml) is an example for an application's
+`.github/workflows/` directory. It is not installed or active CI in oar. Adapt its runtime,
+package manager, Playwright project, and staging URLs to the application; this CLI project does
+not install browser-test dependencies or supply application acceptance tests.
+
+The controller dispatches verification only after `deployWorkflow` succeeds for the merged SHA.
+The verification workflow accepts `expected_sha` and `oar_run_id`; preserve the run-name marker
+`[oar:${{ inputs.oar_run_id }}]` so the controller can correlate the attempt. GitHub dispatch uses
+the configured base branch; the workflow rejects a different `github.sha`, checks out exactly
+`expected_sha`, verifies the version endpoint's JSON `sha` equals that full SHA, then runs the
+application's committed Playwright acceptance suite. A branch that advanced before dispatch
+fails closed rather than testing newer code as if it were the requested change.
+
+Use the same `concurrency.group: staging` with `cancel-in-progress: false` in deployment and
+verification workflows. Keep all writes to a shared staging environment under that group.
+Configure a `staging-verification` GitHub environment with `STAGING_BASE_URL`,
+`STAGING_VERSION_URL`, and, when needed, a staging-only `STAGING_READ_TOKEN`. The version
+endpoint must identify the running build; the Playwright staging project must use
+`PLAYWRIGHT_BASE_URL` and retain traces on failure. The example uploads reports and traces as
+workflow artifacts. Verification has repository read access and no deployment credentials.
+Production promotion remains outside this workflow.
 
 ## Development
 
@@ -144,27 +285,31 @@ Requirements: Node 24 (the factory uses `node:sqlite`) and pnpm 12, as pinned in
 
 ```bash
 pnpm install
-pnpm dev -- status         # run from source
+pnpm dev status         # run from source
 pnpm verify                # typecheck, format check, lint, tests; must be green before a commit
-pnpm install:local         # build dist/oar.mjs, link ~/.local/bin/oar, copy the skill
+pnpm install:local         # build, link ~/.local/bin/oar, install Claude + Codex skills
 oar factory deploy         # ship the build and the config to the controller, restart it
 ```
 
 Unit tests use a scripted fake boat client (`tests/fakes/boat.ts`) and a recording fake exec
 (`tests/fakes/exec.ts`); nothing touches the network. `pnpm format` fixes formatting.
 
+[The CI workflow](.github/workflows/ci.yml) runs `pnpm verify`, builds the bundle, and smoke-tests
+the CLI and temporary-home installer on Linux and macOS for pull requests and pushes to `main`.
+This validates oar itself; application staging workflows remain separately configured.
+
 ### Code map
 
-| Path                                                                                       | What                                                                                              |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| [src/cli.ts](src/cli.ts)                                                                   | Argument parsing, help text, exit codes; the only place that exits                                |
-| [src/config.ts](src/config.ts)                                                             | Config schema and shipped defaults, secrets from `~/.config/oar/env`                              |
-| [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client          |
-| [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                         |
-| [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                             |
-| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor`, `factory` and `ticket` subcommands                     |
-| [src/factory/](src/factory)                                                                | The controller, below                                                                             |
-| [setup/](setup), [vm/](vm), [templates/](templates), [skill/](skill)                       | VM setup scripts and units, files copied onto VMs, brief and reviewer templates, the Claude skill |
+| Path                                                                                       | What                                                                                                                    |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| [src/cli.ts](src/cli.ts)                                                                   | Argument parsing, help text, exit codes; the only place that exits                                                      |
+| [src/config.ts](src/config.ts)                                                             | Config schema and shipped defaults, secrets from `~/.config/oar/env`                                                    |
+| [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client                                |
+| [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                                               |
+| [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                                                   |
+| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor`, `factory` and `ticket` subcommands                                           |
+| [src/factory/](src/factory)                                                                | The controller, below                                                                                                   |
+| [setup/](setup), [vm/](vm), [templates/](templates), [skill/](skill)                       | VM setup scripts and units, files copied onto VMs, brief/reviewer/verification templates, shared Claude and Codex skill |
 
 ### The factory controller
 
@@ -181,26 +326,37 @@ issue observe, decide and apply, then the keeper.
 - [linear.ts](src/factory/linear.ts), [github.ts](src/factory/github.ts), [review.ts](src/factory/review.ts),
   [brief.ts](src/factory/brief.ts) and [keeper.ts](src/factory/keeper.ts) hold the Linear client,
   the GitHub feeds, the automated reviewer, the agent-facing text and VM uptime.
-  [tickets.ts](src/factory/tickets.ts) is the plan-file schema and the ticket template.
+  [tickets.ts](src/factory/tickets.ts) is the plan schema/template;
+  [publication.ts](src/factory/publication.ts) owns durable publication independently of the CLI.
 
 Rules that keep the controller safe to restart at any moment:
 
-- Linear is the only state machine. The controller writes a Linear state only on a phase change.
+- SQLite owns execution phases and delivery evidence; Linear exposes intent and progress. The
+  controller writes a Linear state only when progressing the issue.
 - Comments are idempotent per issue and key, and every prompt carries an `[oar r<n>]` round token.
 - A merge is attempted at most once per head SHA, and a reviewer failure is recorded so it never
   loops.
 - Nothing the agent or the PR controls may configure the controller or the reviewer.
+- The reviewed SHA, required CI checks, merge revision, deployment, and verification must match.
+- A failed staging result cannot mark the issue Done; only successful revision-matched evidence can.
+- Issue/relation publication IDs are written locally before remote mutations and reused on retries.
 
 To add a repo: a `repos.<key>` entry in the config, its Linear team in `factory.linear.teams`,
-`oar vm new <key>`, then `oar factory setup`. No code changes. A new capability should be a new
+the application's checks/workflows and dedicated reviewer environment, `oar vm new <key>`,
+`oar factory check`, then `oar factory setup`. No per-repo controller code changes. A new capability should be a new
 action and job driven by config, not a per-repo branch in the code.
 
 ### Roadmap
 
-Built: the CLI, the controller, questions and replies through Linear, review and CI rounds, the
-staging result, automated P0/P1 review and auto-merge, plans turned into tickets. Next: a separate verify sandbox (UI and
-end-to-end checks), a `validate` gate after staging and automatic promotion, inspection and spec
-recipes that write Linear issues, parallel builds on forked VMs, and HTML or Figma prototyping.
+Built in code: local plan publication with durable operation IDs, Claude/Codex builders,
+independent review sandboxes, strict CI requirements, merge/deploy/verify delivery states,
+evidence records, and controller recovery protections. Deploy and verification workflows still
+belong in each application and require an operator rollout; the historical live checks below do
+not validate the new delivery contract.
+
+Next: migrate terminal-driven workers to supported structured runner interfaces, add an oar MCP
+adapter when useful, broaden application acceptance suites, and increase concurrency only after
+intervention and failure rates justify it. Production promotion is a separate future decision.
 
 ### Confirmed on first real use
 
@@ -221,11 +377,11 @@ Update this list as the end-to-end checks from the plan are run against the real
       fullscreen-renderer prompt, now pre-set via `tui` in `vm/claude-settings.json` and answered by the runner (2026-10-07)
 - [x] `gh pr create` on the VM works with the injected token: nodes-engine draft PR #149 from the smoke task (2026-10-07)
 - [x] `herdr machine add <alias> --label <l> --remote-session default` works non-interactively once the server runs on the VM (2026-10-07)
-- [x] Codex CLI is on both worker images (`/usr/local/bin/codex`); engine has a saved login (2026-10-08). The factory's automated reviewer needs it on every repo VM: `oar vm login <repo> --codex`
+- [x] Codex CLI is on both worker images (`/usr/local/bin/codex`); engine has a saved login (2026-10-08). Historical shared-worker setup; the default sandbox reviewer now needs its own CLI and credentials in `reviewEnvName`
 - [x] boat `sshKey` appends (not replaces) authorized keys: the Mac's and the controller's keys both stay on the workers (2026-10-08); every host re-appends its own key on `vm up` anyway
 - [x] `ttlSeconds: null` accepted at creation for the controller sandbox; `archiveAfter` reads null (2026-10-08)
 - [x] Factory end to end on nodes-cno: Todo, agent, draft PR to `dev`, green CI, Codex review with no findings, auto-merge, Done, staging deploy success, in 26 minutes with no human click (2026-10-08, CNO-1)
 - [x] Linux Herdr client forwards `--machine` to another VM: `herdr machine add oar-engine --label engine --remote-session default` on the controller, then `herdr --machine engine agent list` answers (2026-10-08)
 - [x] Linear client-credentials token works for `viewer` (app user "oar"), `issueUpdate`, `commentCreate` with a client id and `attachmentLinkGitHubPR`; `workflowStateCreate` is refused ("not allowed to take action"), so `oar factory setup` reports missing states and they are added in Settings → Teams → Issue statuses (2026-10-08)
 - [ ] A comment from the "oar" app user pushes to the phone (it does raise an Inbox notification in Linear, 2026-10-08)
-- [x] First live issue ENG-1 → draft PR nodes-engine #151 → In Review in 4 min; a PR comment started round 2 and the agent pushed the fix in 3 min; a merge closed it (2026-10-08). Learned on the way: a cancelled check is not a failure, boat's transient `updating` sandbox state must be waited out, agents pause for their own background shells (one nudge before Needs Input), and a re-queued issue with a PR is resumed rather than re-briefed
+- [x] First live issue ENG-1 → draft PR nodes-engine #151 → In Review in 4 min; a PR comment started round 2 and the agent pushed the fix in 3 min; a merge closed it (2026-10-08). Historical behavior accepted cancelled checks; current merge gates require success. Other findings: boat's transient `updating` sandbox state must be waited out, agents pause for their own background shells (one nudge before Needs Input), and a re-queued issue with a PR is resumed rather than re-briefed

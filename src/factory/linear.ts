@@ -359,6 +359,8 @@ export class LinearClient {
   }
 
   async createIssue(input: {
+    /** Client-supplied UUID v4, persisted before the request for recoverable publication. */
+    id?: string
     teamId: string
     title: string
     description: string
@@ -389,6 +391,7 @@ export class LinearClient {
 
   /** `issueId` blocks `relatedIssueId` (type `blocks`), or the two are related. */
   async createRelation(input: {
+    id?: string
     issueId: string
     relatedIssueId: string
     type: 'blocks' | 'related'
@@ -404,12 +407,46 @@ export class LinearClient {
       throw new LinearError('graphql', `issueRelationCreate failed for ${input.relatedIssueId}`)
   }
 
+  /** Lookup by the client-supplied ID after an uncertain relation-create outcome. */
+  async relation(id: string): Promise<{
+    id: string
+    type: string
+    issueId: string
+    relatedIssueId: string
+  } | null> {
+    try {
+      const data = await this.query(
+        `query Relation($id: String!) {
+          issueRelation(id: $id) { id type issue { id } relatedIssue { id } }
+        }`,
+        { id },
+        z.looseObject({
+          issueRelation: z
+            .looseObject({
+              id: z.string(),
+              type: z.string(),
+              issue: z.looseObject({ id: z.string() }),
+              relatedIssue: z.looseObject({ id: z.string() }),
+            })
+            .nullable(),
+        }),
+      )
+      const r = data.issueRelation
+      return r
+        ? { id: r.id, type: r.type, issueId: r.issue.id, relatedIssueId: r.relatedIssue.id }
+        : null
+    } catch (e) {
+      if (e instanceof LinearError && e.code === 'notfound') return null
+      throw e
+    }
+  }
+
   /**
    * The id of a label usable on the team (a workspace label or the team's own), created on the
    * team when missing. Null when it is missing and this identity may not create labels (the
    * OAuth app may not).
    */
-  async labelId(teamId: string, name: string): Promise<string | null> {
+  async labelId(teamId: string, name: string, create = true): Promise<string | null> {
     const data = await this.query(
       `query Labels($name: String!) {
         issueLabels(filter: { name: { eqIgnoreCase: $name } }, first: 50) {
@@ -432,6 +469,7 @@ export class LinearClient {
     const usable = data.issueLabels.nodes.filter((l) => !l.team || l.team.id === teamId)
     const found = usable.find((l) => l.team?.id === teamId) ?? usable[0]
     if (found) return found.id
+    if (!create) return null
     let created
     try {
       created = await this.query(

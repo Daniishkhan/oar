@@ -46,29 +46,44 @@ export function paths(home: string = homedir()): Paths {
   }
 }
 
-export const RepoSchema = z.object({
-  /** Regex tested against `git remote get-url origin` to identify this repo on the Mac. */
-  remoteMatch: z.string().min(1),
-  github: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-  envName: z.string().min(1),
-  vmPath: z.string().startsWith('/home/user/'),
-  setupScript: z.string().min(1),
-  gate: z.string().min(1),
-  branchPrefix: z.string().default('codex/'),
-  baseBranch: z.string().default('main'),
-  worktreeRoot: z.string().startsWith('/home/user/'),
-  worktreeInit: z.array(z.string()).default([]),
-  services: z.string().optional(),
-  ports: z.array(z.number().int().positive()).default([]),
-  herdrLabel: z.string().min(1),
-  /** The repo's suites need Playwright's own browsers (doctor checks they survive resumes). */
-  playwright: z.boolean().default(false),
-  /** GitHub Actions workflow file that deploys `baseBranch` after a merge (its result is posted on the issue). */
-  deployWorkflow: z.string().optional(),
-  /** Factory: merge the PR once CI is green and the automated review has no blocking findings. */
-  autoMerge: z.boolean().default(true),
-  mergeMethod: z.enum(['squash', 'merge', 'rebase']).default('squash'),
-})
+export const RepoSchema = z
+  .object({
+    /** Regex tested against `git remote get-url origin` to identify this repo on the Mac. */
+    remoteMatch: z.string().min(1),
+    github: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+    envName: z.string().min(1),
+    vmPath: z.string().startsWith('/home/user/'),
+    setupScript: z.string().min(1),
+    gate: z.string().min(1),
+    branchPrefix: z.string().default('codex/'),
+    buildRunner: z.enum(['claude', 'codex']).default('claude'),
+    buildModel: z.string().min(1).optional(),
+    baseBranch: z.string().default('main'),
+    worktreeRoot: z.string().startsWith('/home/user/'),
+    worktreeInit: z.array(z.string()).default([]),
+    services: z.string().optional(),
+    ports: z.array(z.number().int().positive()).default([]),
+    herdrLabel: z.string().min(1),
+    /** The repo's suites need Playwright's own browsers (doctor checks they survive resumes). */
+    playwright: z.boolean().default(false),
+    /** Exact check/status names required for merge; empty means every observed check must succeed. */
+    requiredChecks: z.array(z.string().min(1)).default([]),
+    /** Staging is the default completion contract; merge-only delivery must be explicitly selected. */
+    deliveryMode: z.enum(['staging', 'merge']).default('staging'),
+    /** GitHub Actions workflow that deploys the merged revision on `baseBranch`. */
+    deployWorkflow: z.string().min(1).optional(),
+    /** Separate workflow that verifies the deployed revision, started after deployment completes. */
+    verifyWorkflow: z.string().min(1).optional(),
+    /** Dedicated Boat environment for review; must differ from the builder environment. */
+    reviewEnvName: z.string().min(1).optional(),
+    /** Factory: merge the PR once CI is green and the automated review has no blocking findings. */
+    autoMerge: z.boolean().default(true),
+    mergeMethod: z.enum(['squash', 'merge', 'rebase']).default('squash'),
+  })
+  .refine((repo) => !repo.verifyWorkflow || repo.verifyWorkflow !== repo.deployWorkflow, {
+    message: 'verifyWorkflow must be separate from deployWorkflow',
+    path: ['verifyWorkflow'],
+  })
 export type RepoConfig = z.infer<typeof RepoSchema>
 
 const DEFAULT_STATES = {
@@ -82,6 +97,7 @@ const DEFAULT_STATES = {
 
 const DEFAULT_REVIEW = {
   runner: 'codex' as const,
+  isolation: 'sandbox' as const,
   timeoutMinutes: 15,
   maxRounds: 3,
   blocking: ['P0' as const, 'P1' as const],
@@ -124,12 +140,16 @@ export const FactorySchema = z.object({
   githubPollSeconds: z.number().int().min(15).default(60),
   maxCiRounds: z.number().int().min(0).default(3),
   jobTimeoutMinutes: z.number().positive().default(30),
+  /** Maximum total time waiting for deployment and verification after merge (or a delivery retry). */
+  deliveryTimeoutMinutes: z.number().positive().default(180),
   /** Minutes an agent may sit idle without the done marker or a question before it is reported stalled. */
   stallGraceMinutes: z.number().min(0).default(20),
   /** The automated PR review that runs on the repo VM once CI is green (see README "Factory"). */
   review: z
     .object({
       runner: z.enum(['codex', 'claude']).default('codex'),
+      /** Fresh reviewer sandbox by default; shared-VM worktrees are an explicit compatibility mode. */
+      isolation: z.enum(['sandbox', 'worktree']).default('sandbox'),
       /** Overrides the runner's own default model. */
       model: z.string().optional(),
       timeoutMinutes: z.number().positive().default(15),
@@ -222,6 +242,15 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       ports: [3000],
       herdrLabel: 'engine',
       playwright: true,
+      // The four jobs of nodes-engine's CI workflow; all must succeed on the PR head.
+      requiredChecks: [
+        'Verify',
+        'Integration tests',
+        'End-to-end tests',
+        'Package and drive the desktop app',
+      ],
+      // A desktop app with no staging: the merge completes the ticket.
+      deliveryMode: 'merge',
     },
     cno: {
       remoteMatch: 'nodes-cno|Synapse-Django',
@@ -236,6 +265,8 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       ports: [8000],
       herdrLabel: 'cno',
       deployWorkflow: 'staging.yml',
+      // Only the `checks` job runs on PRs; `release` is skipped there and must not count.
+      requiredChecks: ['checks'],
     },
   },
 })
@@ -249,14 +280,27 @@ export function backfillRepoDefaults(config: Config): string[] {
   const notes: string[] = []
   for (const [name, repo] of Object.entries(config.repos)) {
     const d = DEFAULT_CONFIG.repos[name]
-    if (!d?.deployWorkflow) continue
-    if (!repo.deployWorkflow) {
-      repo.deployWorkflow = d.deployWorkflow
-      notes.push(`${name}.deployWorkflow = ${d.deployWorkflow}`)
+    if (!d) continue
+    if (d.deployWorkflow) {
+      if (!repo.deployWorkflow) {
+        repo.deployWorkflow = d.deployWorkflow
+        notes.push(`${name}.deployWorkflow = ${d.deployWorkflow}`)
+      }
+      if (repo.baseBranch !== d.baseBranch) {
+        notes.push(`${name}.baseBranch ${repo.baseBranch} → ${d.baseBranch}`)
+        repo.baseBranch = d.baseBranch
+      }
     }
-    if (repo.baseBranch !== d.baseBranch) {
-      notes.push(`${name}.baseBranch ${repo.baseBranch} → ${d.baseBranch}`)
-      repo.baseBranch = d.baseBranch
+    // An empty list means "every observed check", which counts a skipped job as a failure.
+    if (!repo.requiredChecks.length && d.requiredChecks.length) {
+      repo.requiredChecks = [...d.requiredChecks]
+      notes.push(`${name}.requiredChecks = ${d.requiredChecks.join(', ')}`)
+    }
+    // A repo whose shipped default has no staging completes on merge; a stored entry predating
+    // `deliveryMode` would otherwise wait for a deployment that never comes.
+    if (d.deliveryMode === 'merge' && !repo.deployWorkflow && repo.deliveryMode !== 'merge') {
+      repo.deliveryMode = 'merge'
+      notes.push(`${name}.deliveryMode = merge (no staging)`)
     }
   }
   return notes

@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { sandboxState } from '../boat.js'
 import { loadSecrets } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
+import { redact } from '../exec.js'
 import { CHANGING_STATES, loadState, UP_STATES } from '../state.js'
 import { sleep } from '../time.js'
 import { Applier } from './apply.js'
@@ -77,6 +79,7 @@ export class Factory {
   /** issue id → when its agent was first seen idle in the current idle spell (in memory; a restart resets it). */
   private readonly agentIdleSince = new Map<string, number>()
   private vmStates = new Map<string, 'up' | 'changing' | 'down' | null>()
+  private linearRetryAt = 0
   tick = 0
 
   constructor(
@@ -203,9 +206,17 @@ export class Factory {
       }
       return
     }
-    const reopenable = row.phase === 'closed' || row.phase === 'failed' || row.phase === 'merged'
+    const history = this.db.evidence(row.id)
+    const delivered = history.some((e) => e.stage === 'merge')
+    const deadline = history.filter((e) => e.stage === 'deadline').at(-1)
+    const staleDeadlineState =
+      deadline?.data.round === row.round &&
+      Date.parse(i.updatedAt) <= Date.parse(deadline.createdAt) &&
+      row.lastSetState !== this.ctx.config.factory.linear.states.needsInput
+    const reopenable = !delivered && (row.phase === 'closed' || row.phase === 'failed')
     if (
       reopenable &&
+      !staleDeadlineState &&
       this.stateKeyOf(row.linearState, row.linearStateType) === 'ready' &&
       row.linearState !== row.lastSetState
     ) {
@@ -291,16 +302,16 @@ export class Factory {
     return existsSync(pauseFile(this.ctx))
   }
 
-  async reconcileAll(): Promise<void> {
+  async reconcileAll(allowActions = true): Promise<void> {
     const githubDue =
-      this.tick %
+      (this.tick - 1) %
         Math.max(
           1,
           Math.round(
             this.ctx.config.factory.githubPollSeconds / this.ctx.config.defaults.pollSeconds,
           ),
         ) ===
-      1
+      0
     const state = loadState(this.ctx.paths)
     const factory = this.ctx.config.factory
     const limits = {
@@ -308,6 +319,7 @@ export class Factory {
       jobTimeoutMs: factory.jobTimeoutMinutes * 60_000,
       maxReviewRounds: factory.review.maxRounds,
       stallGraceMs: factory.stallGraceMinutes * 60_000,
+      deliveryTimeoutMs: factory.deliveryTimeoutMinutes * 60_000,
     }
     for (const row of this.db.activeIssues()) {
       if (this.paused && row.phase === 'queued') continue
@@ -316,7 +328,8 @@ export class Factory {
           db: this.db,
           jobs: this.jobs,
           stateKeyOf: (n, t) => this.stateKeyOf(n, t),
-          concurrency: (repo) => this.ctx.config.factory.concurrency[repo] ?? 1,
+          // A shared builder VM is a single execution slot, regardless of an older config.
+          concurrency: () => 1,
           vmState: (repo) => this.vmStates.get(repo) ?? null,
           sandboxId: (repo) => state.vms[repo]?.sandboxId ?? null,
           githubDue,
@@ -330,11 +343,73 @@ export class Factory {
           this.agentIdleSince.delete(row.id)
         }
         const cfg = this.ctx.config.repos[row.repo]
+        // Deployment and verification runs are recorded by `decide` with the merged SHA.
+        if (facts.ci) this.db.recordEvidence(row.id, 'ci', { ...facts.ci })
+        const task = row.taskId ? state.tasks[row.taskId] : undefined
+        const startedAt = row.roundStartedAt ?? task?.dispatchedAt
+        const started = startedAt ? Date.parse(startedAt) : NaN
+        const jobExpired =
+          (facts.jobRunning || ['dispatching', 'resuming'].includes(row.phase)) &&
+          facts.jobAgeMs > limits.jobTimeoutMs
+        // Only build rounds are budgeted: in review the agent is idle and the PR may legitimately
+        // wait on a human (a hold label, changes requested, auto-merge off).
+        const budgetExpired =
+          !facts.jobRunning &&
+          row.phase === 'building' &&
+          task &&
+          Number.isFinite(started) &&
+          this.ctx.now() - started > task.hours * 3_600_000
+        if (
+          (jobExpired || budgetExpired) &&
+          ['building', 'resuming', 'dispatching', 'review'].includes(row.phase) &&
+          facts.pr?.state !== 'MERGED' &&
+          !row.mergeSha
+        ) {
+          await this.applier.apply(row, [
+            {
+              kind: 'record_evidence',
+              stage: 'deadline',
+              data: {
+                taskId: task?.id ?? null,
+                hours: task?.hours ?? null,
+                startedAt,
+                round: row.round,
+                jobExpired,
+              },
+            },
+            // Invalidate the run before awaiting remote stop, so late job completion cannot revive it.
+            { kind: 'set_phase', phase: 'failed', jobStartedAt: null },
+            { kind: 'stop_agent' },
+            { kind: 'close_task' },
+          ])
+          const failed = this.db.issue(row.id)!
+          await this.applier
+            .apply(failed, [
+              {
+                kind: 'comment',
+                key: `deadline-${row.round}`,
+                body: `${jobExpired ? `The background operation exceeded its ${factory.jobTimeoutMinutes} minute limit` : `The task exceeded its ${task!.hours} hour execution budget`} and was stopped. Inspect its evidence, then move it to ${factory.linear.states.ready} to retry.`,
+              },
+            ])
+            .catch((e: Error) =>
+              this.log(`${row.identifier}: deadline comment pending: ${e.message}`),
+            )
+          await this.applier
+            .setState(failed, 'needsInput')
+            .catch((e: Error) =>
+              this.log(`${row.identifier}: deadline state pending: ${e.message}`),
+            )
+          continue
+        }
+        // Budget enforcement is local; tracker-dependent work waits for fresh tracker state.
+        if (!allowActions) continue
         const actions = decide(row, facts, {
           limits,
           states: factory.linear.states,
           mention: factory.linear.mention,
           tracksDeploy: Boolean(cfg?.deployWorkflow),
+          tracksVerification: Boolean(cfg?.verifyWorkflow),
+          deliveryMode: cfg?.deliveryMode ?? 'staging',
           identifier: row.identifier,
           blocking: factory.review.blocking,
           holdLabel: factory.holdLabel,
@@ -361,37 +436,75 @@ export class Factory {
         .comment(row, p.key, p.body)
         .catch((e: Error) => this.log(`${row.identifier}: pending comment ${p.key}: ${e.message}`))
     }
+    for (const row of this.db.allIssues()) {
+      if (
+        row.phase !== 'failed' ||
+        row.gone ||
+        ['completed', 'canceled'].includes(row.linearStateType)
+      )
+        continue
+      const deadline = this.db
+        .evidence(row.id)
+        .filter((e) => e.stage === 'deadline')
+        .at(-1)
+      if (deadline?.data.round === row.round)
+        await this.applier
+          .setState(row, 'needsInput')
+          .catch((e: Error) => this.log(`${row.identifier}: deadline state pending: ${e.message}`))
+    }
   }
 
   async runTick(): Promise<void> {
     this.tick++
-    try {
-      if (this.tick === 1) await this.retryPendingComments()
-      await this.refreshVms()
-      await this.syncLinear()
-      await this.reconcileAll()
-      if (this.tick % 4 === 0)
-        await keepWorkers(this.ctx, {
+    const stage = async (name: string, fn: () => Promise<void>): Promise<boolean> => {
+      try {
+        await fn()
+        return true
+      } catch (e) {
+        const message = redact((e as Error).message)
+        this.log(`${name}: ${message}`)
+        this.db.event('error', `${name}: ${message.split('\n')[0] ?? ''}`)
+        if (name === 'linear' && e instanceof LinearError && e.code === 'ratelimited') {
+          this.linearRetryAt = this.ctx.now() + 120_000
+          this.log('linear: backing off for two minutes; observations and maintenance continue')
+        }
+        return false
+      }
+    }
+    await stage('vms', () => this.refreshVms())
+    const synced =
+      this.ctx.now() >= this.linearRetryAt && (await stage('linear', () => this.syncLinear()))
+    if (synced) {
+      this.linearRetryAt = 0
+      this.db.setCursor('linear.syncedAt', new Date(this.ctx.now()).toISOString())
+      await stage('comments', () => this.retryPendingComments())
+    }
+    await stage('reconcile', () => this.reconcileAll(synced))
+    if (this.tick % 4 === 0)
+      await stage('keeper', () =>
+        keepWorkers(this.ctx, {
           db: this.db,
           jobs: this.jobs,
           log: this.log,
           idleSince: this.idleSince,
-        })
-      if (this.tick === 1 || this.tick % 20 === 0) await keepSelf(this.ctx, { log: this.log })
-      this.db.setCursor('tick.at', new Date(this.ctx.now()).toISOString())
-      this.db.setCursor('tick.n', String(this.tick))
-    } catch (e) {
-      if (e instanceof LinearError && e.code === 'ratelimited') {
-        this.log('linear: rate limited; pausing two minutes')
-        await sleep(120_000)
-        return
-      }
-      this.log(`tick ${this.tick}: ${(e as Error).message}`)
-      this.db.event('error', (e as Error).message.split('\n')[0] ?? '')
-    }
+        }),
+      )
+    if (this.tick === 1 || this.tick % 20 === 0)
+      await stage('controller keeper', () => keepSelf(this.ctx, { log: this.log }))
+    this.db.setCursor('tick.at', new Date(this.ctx.now()).toISOString())
+    this.db.setCursor('tick.n', String(this.tick))
   }
 
   async serve(opts: { maxTicks?: number } = {}): Promise<void> {
+    const owner = randomUUID()
+    if (!this.db.acquireController(owner)) {
+      this.db.close()
+      throw new OarError(
+        'state_invalid',
+        'another controller owns this database',
+        'run only one oar factory serve process on the controller host',
+      )
+    }
     let stopping = false
     const stop = () => {
       stopping = true
@@ -404,12 +517,18 @@ export class Factory {
         .map(([k, r]) => `${k}→${r}`)
         .join(', ')}`,
     )
-    for (;;) {
-      await this.runTick()
-      if (stopping || (opts.maxTicks && this.tick >= opts.maxTicks)) break
-      await sleep(this.ctx.config.defaults.pollSeconds * 1000)
+    try {
+      for (;;) {
+        await this.runTick()
+        if (stopping || (opts.maxTicks && this.tick >= opts.maxTicks)) break
+        await sleep(this.ctx.config.defaults.pollSeconds * 1000)
+      }
+    } finally {
+      await this.jobs.drain()
+      process.removeListener('SIGTERM', stop)
+      process.removeListener('SIGINT', stop)
+      this.db.releaseController(owner)
+      this.db.close()
     }
-    await this.jobs.drain()
-    this.db.close()
   }
 }

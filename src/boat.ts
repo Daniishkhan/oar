@@ -39,6 +39,19 @@ export interface CommandResult {
   timedOut: boolean
 }
 
+/** Nonsecret environment policy used to validate disposable worker credentials. */
+export interface EnvironmentInfo {
+  id: string
+  name: string
+  latestVersionId: string | null
+  latestVersionNumber: number | null
+  safeForThirdParties: boolean
+  passGithub: boolean
+  passSecrets: boolean
+  passSandboxCredentials: boolean
+  passAgentsCredentials: boolean
+}
+
 /** The slice of boat's API that oar uses. Tests implement it with a scripted fake. */
 export interface BoatClient {
   get(id: string): Promise<Sandbox>
@@ -66,7 +79,7 @@ export interface BoatClient {
   writeFile(id: string, path: string, content: string): Promise<void>
   usage(id: string, since?: string, until?: string): Promise<SandboxUsageResponse>
   saveNamedSnapshot(id: string, name: string): Promise<void>
-  environments(): Promise<Array<{ id: string; name: string }>>
+  environments(): Promise<EnvironmentInfo[]>
 }
 
 async function mapError(e: unknown): Promise<never> {
@@ -185,7 +198,20 @@ export function realBoat(apiKey: string): BoatClient {
       ).then(() => undefined),
     environments: () =>
       guard(() => api.environments()).then((r) =>
-        r.environments.map((e) => ({ id: e.id, name: e.name })),
+        r.environments.map((e) => ({
+          id: e.id,
+          name: e.name,
+          latestVersionId: e.latestVersionId,
+          latestVersionNumber:
+            e.latestVersionNumber ??
+            e.versions.find((v) => v.id === e.latestVersionId)?.versionNumber ??
+            null,
+          safeForThirdParties: e.safeForThirdParties,
+          passGithub: e.passGithub,
+          passSecrets: e.passSecrets,
+          passSandboxCredentials: e.passSandboxCredentials,
+          passAgentsCredentials: e.passAgentsCredentials,
+        })),
       ),
   }
 }

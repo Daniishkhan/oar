@@ -14,11 +14,12 @@ import {
   reviewPrompt,
   reviewWorktree,
   verdictOf,
+  type ReviewOutput,
 } from '../../src/factory/review.js'
-import type { Finding, IssueRow } from '../../src/factory/types.js'
+import type { IssueRow } from '../../src/factory/types.js'
 
 const cfg = DEFAULT_CONFIG.repos.cno!
-const p1: Finding = {
+const p1: ReviewOutput['findings'][number] = {
   severity: 'P1',
   file: 'a.py',
   line: 3,
@@ -26,7 +27,14 @@ const p1: Finding = {
   detail: 'loses\nrows',
   fix: 'use <=',
 }
-const p2: Finding = { severity: 'P2', file: '', line: null, title: 'Naming', detail: '', fix: null }
+const p2: ReviewOutput['findings'][number] = {
+  severity: 'P2',
+  file: '',
+  line: null,
+  title: 'Naming',
+  detail: '',
+  fix: null,
+}
 
 describe('review helpers', () => {
   it('runs codex read-only on the detached checkout with the schema and a hard timeout', () => {
@@ -42,7 +50,7 @@ describe('review helpers', () => {
     expect(cmd).not.toContain('bypass')
     const claude = reviewCommand('claude', { cwd: '/w', files, timeoutSeconds: 60, model: 'opus' })
     expect(claude).toContain(
-      "claude -p --restricted --strict-mcp-config --add-dir '/home/user/oar/tasks/cno-1-x-ab12' --output-format json --json-schema \"$(cat ",
+      "claude -p --restricted --tools Read,Glob,Grep --strict-mcp-config --add-dir '/home/user/oar/tasks/cno-1-x-ab12' --output-format json --json-schema \"$(cat ",
     )
     expect(claude).toContain("--model 'opus'")
   })
@@ -77,6 +85,17 @@ describe('review helpers', () => {
       ).summary,
     ).toBe('f')
     expect(() => parseReviewOutput('codex', 'not json')).toThrow()
+    for (const malformed of [
+      {},
+      { summary: 'Looks good' },
+      { summary: 's', findings: null },
+      { summary: 's', findings: [{}] },
+    ])
+      expect(() => parseReviewOutput('codex', JSON.stringify(malformed))).toThrow()
+    expect(() =>
+      parseReviewOutput('claude', '{"structured_output":{"summary":"Looks good"}}'),
+    ).toThrow()
+    expect(() => parseReviewOutput('claude', 'null')).toThrow()
     expect(() =>
       parseReviewOutput('codex', '{"findings":[{"severity":"P9","title":"x"}]}'),
     ).toThrow()

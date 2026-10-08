@@ -20,6 +20,8 @@ export interface DecideContext {
   mention?: string
   /** The repo has a deploy workflow whose result is worth waiting for after a merge. */
   tracksDeploy: boolean
+  tracksVerification: boolean
+  deliveryMode: 'staging' | 'merge'
   identifier: string
   /** Severities from the automated reviewer that block the merge. */
   blocking: readonly Severity[]
@@ -61,22 +63,173 @@ const cancel = (ctx: DecideContext, row: IssueRow, why: string): Action[] => [
   { kind: 'event', name: 'closed', detail: why },
 ]
 
-const merged = (ctx: DecideContext, row: IssueRow, f: Facts): Action[] => [
+const merged = (ctx: DecideContext, row: IssueRow, f: Facts): Action[] => {
+  const staging = ctx.deliveryMode === 'staging'
+  return [
+    {
+      kind: 'record_evidence',
+      stage: 'merge',
+      data: {
+        sha: f.pr?.mergeSha ?? null,
+        reviewedSha: row.reviewedSha,
+        prUrl: f.pr?.url ?? row.prUrl,
+        deliveryMode: ctx.deliveryMode,
+      },
+    },
+    {
+      kind: 'comment',
+      key: `merged-${f.pr?.number ?? row.prNumber ?? 0}`,
+      body: `Merged: ${f.pr?.url ?? row.prUrl ?? ''}. ${staging ? 'Waiting for deployment and verification of the merged revision before marking Done.' : 'Merge-only delivery is complete; staging was not verified.'}`,
+    },
+    { kind: 'set_state', state: staging ? 'inReview' : 'done' },
+    { kind: 'stop_agent' },
+    { kind: 'close_task' },
+    {
+      kind: 'set_phase',
+      phase: staging ? 'merged' : 'closed',
+      roundStartSha: f.pr?.mergeSha ?? null,
+      roundStartedAt: f.nowIso,
+      jobStartedAt: null,
+    },
+    { kind: 'event', name: 'merged', detail: f.pr?.url ?? '' },
+  ]
+}
+
+const deliveryConfigurationError = (ctx: DecideContext): string | null =>
+  ctx.deliveryMode === 'staging' && (!ctx.tracksDeploy || !ctx.tracksVerification)
+    ? 'Staging delivery requires both repo.deployWorkflow and repo.verifyWorkflow. Configure a deployment workflow and a separate verification workflow for the same merged revision, or explicitly choose repo.deliveryMode="merge" for merge-only completion.'
+    : null
+
+const deliveryFailure = (
+  ctx: DecideContext,
+  row: IssueRow,
+  key: string,
+  message: string,
+): Action[] => [
+  {
+    kind: 'record_evidence',
+    stage: 'delivery-blocked',
+    data: { sha: row.roundStartSha, reason: message },
+  },
   {
     kind: 'comment',
-    key: `merged-${f.pr?.number ?? row.prNumber ?? 0}`,
-    body: `Merged: ${f.pr?.url ?? row.prUrl ?? ''}.${ctx.tracksDeploy ? ' Watching the deploy workflow; its result comes next.' : ''}`,
+    key,
+    body: withMention(
+      ctx,
+      `${message} Fix or rerun the workflows in GitHub Actions, then reply here or move this issue to ${ctx.states.ready} to recheck delivery. The merged branch will not be sent back to a coding agent.`,
+    ),
   },
-  { kind: 'set_state', state: 'done' },
-  { kind: 'stop_agent' },
-  { kind: 'close_task' },
-  {
-    kind: 'set_phase',
-    phase: ctx.tracksDeploy ? 'merged' : 'closed',
-    roundStartSha: f.pr?.mergeSha ?? null,
-  },
-  { kind: 'event', name: 'merged', detail: f.pr?.url ?? '' },
+  { kind: 'set_state', state: 'needsInput' },
+  { kind: 'set_phase', phase: 'delivery_failed', jobStartedAt: null },
 ]
+
+/** Deployment and acceptance verification must attest the same exact revision in that order. */
+function delivery(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
+  if (ctx.deliveryMode === 'merge')
+    return [
+      {
+        kind: 'comment',
+        key: `merge-only-${row.roundStartSha}`,
+        body: 'Merge-only delivery is complete; staging was not verified.',
+      },
+      { kind: 'set_state', state: 'done' },
+      { kind: 'set_phase', phase: 'closed' },
+    ]
+  const invalid = deliveryConfigurationError(ctx)
+  if (invalid) return deliveryFailure(ctx, row, `delivery-config-${row.roundStartSha}`, invalid)
+  if (!row.roundStartSha)
+    return deliveryFailure(
+      ctx,
+      row,
+      'delivery-no-sha',
+      'The merged revision is missing; delivery cannot be verified. Restore the merge commit in the controller delivery record.',
+    )
+  const sha = row.roundStartSha
+  const deployment = f.staging?.headSha === sha ? f.staging : null
+  const verification =
+    f.verificationRequested && f.verification?.headSha === sha ? f.verification : null
+  const evidence: Action[] = []
+  if (deployment)
+    evidence.push({ kind: 'record_evidence', stage: 'deployment', data: { ...deployment, sha } })
+  if (verification)
+    evidence.push({
+      kind: 'record_evidence',
+      stage: 'verification',
+      data: { ...verification, sha },
+    })
+  if (deployment?.status === 'completed' && deployment.conclusion !== 'success')
+    return [
+      ...evidence,
+      ...deliveryFailure(
+        ctx,
+        row,
+        `deploy-failed-${sha}-${deployment.runId}-${deployment.attempt}`,
+        `Deployment ${deployment.conclusion ?? 'has no successful conclusion'} for ${sha}: ${deployment.url}.`,
+      ),
+    ]
+  const deployed = deployment?.status === 'completed' && deployment.conclusion === 'success'
+  const followsDeployment =
+    deployed &&
+    deployment.completedAt &&
+    verification?.startedAt &&
+    Date.parse(verification.startedAt) >= Date.parse(deployment.completedAt)
+  if (followsDeployment && verification.status === 'completed') {
+    if (verification.conclusion !== 'success')
+      return [
+        ...evidence,
+        ...deliveryFailure(
+          ctx,
+          row,
+          `verify-failed-${sha}-${verification.runId}-${verification.attempt}`,
+          `Staging verification ${verification.conclusion ?? 'has no successful conclusion'} for ${sha}: ${verification.url}.`,
+        ),
+      ]
+    return [
+      ...evidence,
+      {
+        kind: 'record_evidence',
+        stage: 'delivery',
+        data: {
+          outcome: 'verified',
+          sha,
+          deploymentRunId: deployment.runId,
+          verificationRunId: verification.runId,
+        },
+      },
+      {
+        kind: 'comment',
+        key: `verified-${sha}`,
+        body: `Verified on staging: ${sha}.\n\nDeployment: ${deployment.url}\nVerification: ${verification.url}\nPR: ${row.prUrl ?? ''}\nReviewed commit: ${row.reviewedSha ?? 'not recorded (external merge)'}`,
+      },
+      { kind: 'set_state', state: 'done' },
+      { kind: 'set_phase', phase: 'closed' },
+      { kind: 'event', name: 'staging-verified', detail: sha },
+    ]
+  }
+  const since = row.roundStartedAt
+    ? Date.parse(f.nowIso) - Date.parse(row.roundStartedAt)
+    : Infinity
+  if (since > ctx.limits.deliveryTimeoutMs)
+    return [
+      ...evidence,
+      ...deliveryFailure(
+        ctx,
+        row,
+        `delivery-timeout-${sha}-${row.roundStartedAt}`,
+        `Delivery of ${sha} did not finish within ${Math.round(ctx.limits.deliveryTimeoutMs / 60_000)} minutes. ${deployed ? 'A successful verification run must start after deployment completes and report the same revision.' : 'No successful deployment of the exact merged revision was observed.'}`,
+      ),
+    ]
+  if (deployed && row.phase !== 'verifying')
+    evidence.push({ kind: 'set_phase', phase: 'verifying' })
+  if (deployed && !f.verificationRequested && !f.jobRunning)
+    evidence.push({
+      kind: 'verify_staging',
+      sha,
+      deploymentRunId: deployment.runId,
+      deploymentAttempt: deployment.attempt,
+    })
+  return evidence
+}
 
 /**
  * The agent touched `done`: either new commits reached the PR, or a later round had nothing to
@@ -102,6 +255,7 @@ const roundComplete = (row: IssueRow, f: Facts, allowNoop = true): Action[] | nu
         prUrl: f.pr.url,
         reviewCursor: f.nowIso,
         roundStartSha: f.pr.headSha,
+        roundStartedAt: f.nowIso,
       },
       { kind: 'event', name: 'review', detail: `round ${row.round} ${f.pr.url}` },
     )
@@ -115,7 +269,7 @@ const roundComplete = (row: IssueRow, f: Facts, allowNoop = true): Action[] | nu
         body: `Round ${row.round} ended without new commits; the agent's reply:${fence(f.paneTail, 1200)}`,
       },
       { kind: 'set_state', state: 'inReview' },
-      { kind: 'set_phase', phase: 'review', reviewCursor: f.nowIso },
+      { kind: 'set_phase', phase: 'review', reviewCursor: f.nowIso, roundStartedAt: f.nowIso },
       { kind: 'event', name: 'review', detail: `round ${row.round} (no changes)` },
     ]
   return null
@@ -157,7 +311,18 @@ function reviewGate(ctx: DecideContext, row: IssueRow, f: Facts): Action[] {
       ]
     return []
   }
-  if (!f.ci || f.ci.headSha !== head || f.ci.pending || !f.ci.passed) return []
+  if (!f.ci || f.ci.headSha !== head || f.ci.pending || !f.ci.passed) {
+    const waited = row.roundStartedAt ? Date.parse(f.nowIso) - Date.parse(row.roundStartedAt) : 0
+    if (waited > ctx.limits.jobTimeoutMs)
+      return needsInput(
+        `ci-unverified-${head}`,
+        withMention(
+          ctx,
+          `CI for ${pr.url} has not produced successful required checks within ${Math.round(ctx.limits.jobTimeoutMs / 60_000)} minutes.${f.ci?.missing?.length ? ` Missing: ${f.ci.missing.join(', ')}.` : ''} Check GitHub Actions and the repo.requiredChecks configuration, then reply here to retry.`,
+        ),
+      )
+    return []
+  }
   if (row.reviewedSha !== head) return [{ kind: 'auto_review', sha: head }]
   if (row.reviewVerdict === 'error')
     return needsInput(
@@ -196,6 +361,9 @@ function reviewGate(ctx: DecideContext, row: IssueRow, f: Facts): Action[] {
       },
     ]
   }
+  if (row.reviewVerdict !== 'pass') return []
+  const invalid = deliveryConfigurationError(ctx)
+  if (invalid) return needsInput(`delivery-config-${head}`, withMention(ctx, invalid))
   // Clean review of the head with green CI.
   if (pr.reviewDecision === 'CHANGES_REQUESTED') return []
   if (pr.mergeable === 'CONFLICTING')
@@ -208,6 +376,8 @@ function reviewGate(ctx: DecideContext, row: IssueRow, f: Facts): Action[] {
     )
   const held = row.labels.some((l) => l.toLowerCase() === ctx.holdLabel.toLowerCase())
   if (held || !ctx.autoMerge) return []
+  // The merge job re-checks this under the repo lock; deciding it here keeps the tick quiet.
+  if (f.deliveryBusy) return []
   return [
     { kind: 'merge', number: pr.number, sha: head, method: ctx.mergeMethod, isDraft: pr.isDraft },
   ]
@@ -224,6 +394,16 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           { kind: 'event', name: 'closed', detail: 'before start' },
         ]
       if (f.linearKey !== 'ready' || row.kind !== 'build') return []
+      if (f.pr?.state === 'MERGED') return merged(ctx, row, f)
+      const invalid = deliveryConfigurationError(ctx)
+      if (invalid)
+        return [
+          ...needsInput(
+            'delivery-config',
+            withMention(ctx, `${invalid} Then move the issue back to ${ctx.states.ready}.`),
+          ),
+          { kind: 'set_phase', phase: 'failed' },
+        ]
       if (f.vmUp === null)
         return [
           ...needsInput(
@@ -436,7 +616,12 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
         kind: 'conversation',
       }))
       const comments = [...f.review.comments, ...fromLinear]
-      const ciFailed = Boolean(f.ci && f.ci.failed.length && f.ci.headSha !== row.handledCiSha)
+      const ciFailed = Boolean(
+        f.ci &&
+        f.ci.headSha === f.pr.headSha &&
+        f.ci.failed.length &&
+        f.ci.headSha !== row.handledCiSha,
+      )
       if (ciFailed && row.ciRounds >= ctx.limits.maxCiRounds)
         return [
           ...needsInput(
@@ -462,29 +647,20 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
         },
       ]
     }
-    case 'merged': {
-      if (!ctx.tracksDeploy) return [{ kind: 'set_phase', phase: 'closed' }]
-      if (f.staging?.conclusion)
-        return [
-          {
-            kind: 'comment',
-            key: `deploy-${row.roundStartSha ?? 'x'}`,
-            body: `Deploy workflow ${f.staging.conclusion}${f.staging.url ? `: ${f.staging.url}` : ''}.${f.staging.conclusion === 'success' ? ' Staging has this change; validate it there.' : ''}`,
-          },
-          { kind: 'set_phase', phase: 'closed' },
-          { kind: 'event', name: 'deploy', detail: f.staging.conclusion },
-        ]
-      const since = row.roundStartedAt ? Date.parse(f.nowIso) - Date.parse(row.roundStartedAt) : 0
-      if (since > 3 * 3_600_000)
-        return [
-          {
-            kind: 'comment',
-            key: `deploy-none-${row.roundStartSha ?? 'x'}`,
-            body: 'No deploy workflow run was found for the merge commit after three hours; check GitHub Actions.',
-          },
-          { kind: 'set_phase', phase: 'closed' },
-        ]
-      return []
+    case 'merged':
+    case 'verifying': {
+      if (canceled) return cancel(ctx, row, 'Delivery tracking canceled in Linear.')
+      return delivery(row, f, ctx)
+    }
+    case 'delivery_failed': {
+      if (canceled) return cancel(ctx, row, 'Delivery tracking canceled in Linear.')
+      if (!f.undelivered.length && !(f.humanMoved && f.linearKey === 'ready')) return []
+      return [
+        { kind: 'acknowledge', comments: f.undelivered, reason: 'delivery-retry' },
+        { kind: 'set_state', state: 'inReview' },
+        { kind: 'set_phase', phase: 'merged', roundStartedAt: f.nowIso },
+        { kind: 'event', name: 'delivery-retry', detail: row.roundStartSha ?? '' },
+      ]
     }
     default:
       return []

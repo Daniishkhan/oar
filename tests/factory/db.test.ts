@@ -33,6 +33,41 @@ beforeEach(() => {
 })
 afterEach(() => db.close())
 
+describe('durable controller ownership and evidence', () => {
+  it('rejects a second owner until the first releases, including in the same process', () => {
+    expect(db.acquireController('first')).toBe(true)
+    expect(db.acquireController('second')).toBe(false)
+    db.releaseController('second')
+    expect(db.acquireController('second')).toBe(false)
+    db.releaseController('first')
+    expect(db.acquireController('second')).toBe(true)
+  })
+
+  it('recovers a dead local process but does not steal from another host', () => {
+    expect(db.acquireController('dead', { pid: 1, host: 'local', alive: () => false })).toBe(true)
+    expect(db.acquireController('remote', { host: 'remote', alive: () => false })).toBe(false)
+    expect(db.acquireController('replacement', { host: 'local', alive: () => false })).toBe(true)
+  })
+
+  it('keeps evidence across restarts and deduplicates repeated observations without losing transitions', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'oar-evidence-')), 'factory.sqlite')
+    let disk = new FactoryDb(path, () => clock)
+    disk.recordEvidence('i1', 'ci', { sha: 'a', passed: false })
+    disk.recordEvidence('i1', 'ci', { sha: 'a', passed: false })
+    disk.recordEvidence('i1', 'ci', { sha: 'a', passed: true })
+    disk.recordEvidence('i1', 'ci', { sha: 'b', passed: false })
+    disk.close()
+    disk = new FactoryDb(path)
+    expect(disk.evidence('i1').map((e) => e.data)).toEqual([
+      { sha: 'a', passed: false },
+      { sha: 'a', passed: true },
+      { sha: 'b', passed: false },
+    ])
+    expect(disk.evidence('unknown')).toEqual([])
+    disk.close()
+  })
+})
+
 describe('issues', () => {
   it('inserts a new issue in phase queued with defaults', () => {
     const row = db.upsertIssue(sync())

@@ -125,6 +125,7 @@ async function syncConfig(ctx: Ctx, sandboxId: string, log: Log): Promise<void> 
 export async function factorySetup(ctx: Ctx): Promise<void> {
   const log = ctx.io.out
   if (isController(ctx)) throw usage('run oar factory setup from the Mac, not on the controller')
+  requireFactoryConfig(ctx.config)
   const secrets = loadSecrets(ctx.paths)
   const hasLinear = Boolean(
     (secrets.LINEAR_CLIENT_ID && secrets.LINEAR_CLIENT_SECRET) || secrets.LINEAR_API_KEY,
@@ -265,6 +266,7 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
 
 /** Rebuild the bundle, copy it over, sync the config, restart the unit. */
 export async function factoryDeploy(ctx: Ctx): Promise<void> {
+  requireFactoryConfig(ctx.config)
   const log = ctx.io.out
   const root = assetsRoot()
   const build = await ctx.exec.run('pnpm', ['build'], { cwd: root, timeoutMs: 180_000 })
@@ -395,6 +397,93 @@ export async function factoryStatus(ctx: Ctx): Promise<void> {
   }
 }
 
+/** A stable, machine-readable record for the CLI and future agent-facing transports. */
+export function runEvidence(db: FactoryDb, ref: string) {
+  const row = db.issueByIdentifier(ref) ?? db.issue(ref)
+  if (!row) throw new OarError('no_task', `no factory issue '${ref}'`)
+  return {
+    version: 1,
+    issue: row.identifier,
+    issueId: row.id,
+    url: row.url,
+    repo: row.repo,
+    phase: row.phase,
+    taskId: row.taskId,
+    pr: row.prUrl,
+    reviewedSha: row.reviewedSha,
+    reviewVerdict: row.reviewVerdict,
+    evidence: db.evidence(row.id),
+    events: db.events({ issueId: row.id, limit: 100 }),
+  }
+}
+
+export async function factoryEvidence(ctx: Ctx, ref: string): Promise<void> {
+  if (!isController(ctx)) {
+    await forward(ctx, ['evidence', ref])
+    return
+  }
+  const db = new FactoryDb(dbPath(ctx), ctx.now)
+  try {
+    ctx.io.out(JSON.stringify(runEvidence(db, ref), null, 2))
+  } finally {
+    db.close()
+  }
+}
+
+/** The config as `setup`/`deploy` would ship it: stored entries brought up to the shipped defaults. */
+export function effectiveConfig(config: Config): { config: Config; notes: string[] } {
+  const effective = structuredClone(config)
+  return { config: effective, notes: backfillRepoDefaults(effective) }
+}
+
+/** Local rollout validation; no credentials or external mutations are needed. */
+export function factoryConfigProblems(stored: Config): string[] {
+  const { config } = effectiveConfig(stored)
+  const problems: string[] = []
+  const repos = new Set(Object.values(config.factory.linear.teams))
+  for (const name of repos) {
+    const repo = config.repos[name]
+    if (!repo) {
+      problems.push(`${name}: Linear team maps to an unknown repository`)
+      continue
+    }
+    if (repo.deliveryMode === 'staging') {
+      if (!repo.deployWorkflow) problems.push(`${name}: set deployWorkflow for staging delivery`)
+      if (!repo.verifyWorkflow)
+        problems.push(`${name}: set verifyWorkflow for staging acceptance checks`)
+      if (repo.deployWorkflow && repo.deployWorkflow === repo.verifyWorkflow)
+        problems.push(`${name}: verifyWorkflow must be a distinct verification workflow`)
+    }
+    if (
+      config.factory.review.isolation === 'sandbox' &&
+      (!repo.reviewEnvName || repo.reviewEnvName === repo.envName)
+    )
+      problems.push(`${name}: set reviewEnvName to a dedicated Boat review environment`)
+    if (
+      repo.buildRunner === config.factory.review.runner &&
+      (!repo.buildModel ||
+        !config.factory.review.model ||
+        repo.buildModel === config.factory.review.model)
+    )
+      problems.push(
+        `${name}: use a different reviewer runner or explicitly different build/review models`,
+      )
+    if ((config.factory.concurrency[name] ?? 1) > 1)
+      problems.push(`${name}: concurrency must be 1 while builders share a repository VM`)
+  }
+  return problems
+}
+
+function requireFactoryConfig(config: Config): void {
+  const problems = factoryConfigProblems(config)
+  if (problems.length)
+    throw new OarError(
+      'config',
+      `factory configuration is incomplete:\n${problems.join('\n')}`,
+      'configure staging workflows and the review environment, then run oar factory check',
+    )
+}
+
 export async function factoryLog(
   ctx: Ctx,
   opts: { issue?: string; follow?: boolean; lines?: number },
@@ -473,6 +562,8 @@ export async function factoryDoctor(ctx: Ctx): Promise<boolean> {
   if (!isController(ctx)) return (await forward(ctx, ['doctor'])) === 0
   const checks: Array<[string, boolean, string]> = []
   const push = (name: string, ok: boolean, detail = '') => checks.push([name, ok, detail])
+  const configProblems = factoryConfigProblems(ctx.config)
+  push('factory configuration', configProblems.length === 0, configProblems.join('; '))
   const unit = await ctx.exec.run('systemctl', ['is-active', 'oar-factory'])
   push('oar-factory.service', unit.stdout.trim() === 'active', unit.stdout.trim())
   const db = new FactoryDb(dbPath(ctx), ctx.now)
@@ -580,6 +671,17 @@ export async function factoryCmd(ctx: Ctx, args: string[]): Promise<number> {
     case 'status':
       await factoryStatus(ctx)
       return 0
+    case 'evidence':
+      if (!rest[0]) throw usage('oar factory evidence <ISSUE>')
+      await factoryEvidence(ctx, rest[0])
+      return 0
+    case 'check': {
+      for (const note of effectiveConfig(ctx.config).notes) ctx.io.out(`deploy will set ${note}`)
+      const problems = factoryConfigProblems(ctx.config)
+      for (const problem of problems) ctx.io.out(problem)
+      if (!problems.length) ctx.io.out('factory configuration is ready')
+      return problems.length ? 1 : 0
+    }
     case 'log': {
       const follow = rest.includes('-f') || rest.includes('--follow')
       const nIdx = rest.findIndex((a) => a === '-n' || a === '--lines')
