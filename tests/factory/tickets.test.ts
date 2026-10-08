@@ -38,7 +38,14 @@ class FakeLinear {
   calls: string[] = []
   issues = new Map<
     string,
-    { id: string; identifier: string; title: string; url: string; description: string }
+    {
+      id: string
+      identifier: string
+      title: string
+      url: string
+      description: string
+      assigneeId: string | null
+    }
   >()
   private n = 0
   failOnCreate: string | null = null
