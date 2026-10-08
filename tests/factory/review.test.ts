@@ -146,6 +146,8 @@ describe('review helpers', () => {
     expect(text).toContain('`origin/dev`')
     expect(text).toContain('Keep <base> literal.')
     expect(text).toContain('Only P0 and P1 findings block the merge.')
+    expect(text).toContain('check every one against the')
+    expect(text).toContain('Do not judge the Staging check')
     expect(text).not.toMatch(
       /<(pr-url|identifier|title|head-sha|gate|blocking|description|diff-path|commits-path)>/,
     )

@@ -98,7 +98,9 @@ Linear and GitHub and drives the worker VMs with the same code the CLI uses:
   (nodes-cno: the staging workflow result is posted first). Canceling stops the agent.
 - Once the PR's checks are green and nobody has commented, an automated reviewer (Codex by
   default, `factory.review`) reads the head commit in a detached worktree on the repo VM,
-  read-only, and posts its findings on the PR and the issue. P0/P1 findings (`review.blocking`)
+  read-only, and posts its findings on the PR and the issue. It checks every functional and
+  non-functional criterion a ticket lists; an unmet one is P1, and the builder lists how it met
+  each one in the PR body. P0/P1 findings (`review.blocking`)
   go back to the agent as a review round, at most `review.maxRounds` times; a clean review merges
   the PR (`gh pr merge --squash --match-head-commit`, per repo `autoMerge`/`mergeMethod`). Human
   feedback always comes first. A `hold` label on the issue (`factory.holdLabel`) stops the merge;

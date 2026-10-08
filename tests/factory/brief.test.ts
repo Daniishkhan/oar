@@ -274,4 +274,10 @@ describe('automated review in briefs', () => {
   it('tells the builder that a clean review merges on its own', () => {
     expect(factoryFooter(task, issue()).extra?.join('\n')).toContain('automated reviewer')
   })
+  it('asks the builder to account for every criterion and to ask about open decisions', () => {
+    const extra = factoryFooter(task, issue()).extra?.join('\n') ?? ''
+    expect(extra).toContain('"Criteria" section to the PR body')
+    expect(extra).toContain('"Decisions to ask about"')
+    expect(extra).toContain('what is listed under Out stays untouched')
+  })
 })

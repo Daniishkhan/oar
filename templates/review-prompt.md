@@ -19,6 +19,10 @@ files, commit, push, or comment anywhere. A program consumes your answer.
    cover them.
 3. Judge the change against the task above and the repository's rules. Do not run the test
    suite: CI already passed (the gate is `<gate>`).
+4. When the task lists Functional and Non-functional criteria, check every one against the
+   diff. A criterion the change does not meet is P1, or P0 when it is about security or private
+   data; name the criterion in the finding. Work outside the task's Scope (or listed under Out)
+   is P1 when it changes behaviour. Do not judge the Staging check: it runs after the deploy.
 
 ## Severity
 
