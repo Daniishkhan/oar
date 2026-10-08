@@ -343,6 +343,9 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             `${f.question.trim()}\n\n_Reply here; your comment goes straight to the agent._`,
           ),
         )
+      // Idle without finishing usually means a background job (the gate) is still running; Claude
+      // Code wakes up by itself when it ends. Only a long quiet spell counts as a stall.
+      if (f.idleForMs < ctx.limits.stallGraceMs) return []
       return needsInput(
         `stalled-${row.round}`,
         withMention(

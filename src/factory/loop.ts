@@ -74,6 +74,8 @@ export class Factory {
   private readonly teamIds = new Map<string, string>()
   private readonly stateIds = new Map<string, Map<string, string>>()
   private readonly idleSince = new Map<string, number>()
+  /** issue id → when its agent was first seen idle in the current idle spell (in memory; a restart resets it). */
+  private readonly agentIdleSince = new Map<string, number>()
   private vmStates = new Map<string, 'up' | 'changing' | 'down' | null>()
   tick = 0
 
@@ -294,6 +296,7 @@ export class Factory {
       maxCiRounds: factory.maxCiRounds,
       jobTimeoutMs: factory.jobTimeoutMinutes * 60_000,
       maxReviewRounds: factory.review.maxRounds,
+      stallGraceMs: factory.stallGraceMinutes * 60_000,
     }
     for (const row of this.db.activeIssues()) {
       if (this.paused && row.phase === 'queued') continue
@@ -307,6 +310,14 @@ export class Factory {
           sandboxId: (repo) => state.vms[repo]?.sandboxId ?? null,
           githubDue,
         })
+        const now = this.ctx.now()
+        if (facts.agent === 'idle' || facts.agent === 'done') {
+          const since = this.agentIdleSince.get(row.id) ?? now
+          this.agentIdleSince.set(row.id, since)
+          facts.idleForMs = now - since
+        } else if (facts.agent !== 'unknown') {
+          this.agentIdleSince.delete(row.id)
+        }
         const cfg = this.ctx.config.repos[row.repo]
         const actions = decide(row, facts, {
           limits,

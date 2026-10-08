@@ -151,14 +151,16 @@ export interface Facts {
   jobAgeMs: number
   /** Issues this one is blocked by that are not done yet. */
   blocked: boolean
-  /** The agent was already nudged this round (idle without the marker). */
-  nudged: boolean
+  /** How long the agent has been idle without interruption, as this controller saw it (0 when not idle). */
+  idleForMs: number
 }
 
 export interface Limits {
   maxCiRounds: number
   jobTimeoutMs: number
   maxReviewRounds: number
+  /** An idle agent without the done marker or a question is reported as stalled only after this long. */
+  stallGraceMs: number
 }
 
 export type Action =
@@ -197,7 +199,6 @@ export type Action =
       reviewRounds?: number
       mergeSha?: string | null
     }
-  | { kind: 'nudge'; text: string }
   | { kind: 'stop_agent' }
   | { kind: 'close_task' }
   | { kind: 'event'; name: string; detail?: string }

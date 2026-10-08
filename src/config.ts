@@ -124,6 +124,8 @@ export const FactorySchema = z.object({
   githubPollSeconds: z.number().int().min(15).default(60),
   maxCiRounds: z.number().int().min(0).default(3),
   jobTimeoutMinutes: z.number().positive().default(30),
+  /** Minutes an agent may sit idle without the done marker or a question before it is reported stalled. */
+  stallGraceMinutes: z.number().min(0).default(20),
   /** The automated PR review that runs on the repo VM once CI is green (see README "Factory"). */
   review: z
     .object({

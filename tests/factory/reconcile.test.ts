@@ -67,7 +67,7 @@ const facts = (over: Partial<Facts> = {}): Facts => ({
   jobRunning: false,
   jobAgeMs: 0,
   blocked: false,
-  nudged: false,
+  idleForMs: 0,
   ...over,
 })
 
@@ -94,7 +94,12 @@ const comment = (over: Partial<HumanComment> = {}): HumanComment => ({
 })
 
 const ctx: DecideContext = {
-  limits: { maxCiRounds: 3, jobTimeoutMs: 30 * 60_000, maxReviewRounds: 3 },
+  limits: {
+    maxCiRounds: 3,
+    jobTimeoutMs: 30 * 60_000,
+    maxReviewRounds: 3,
+    stallGraceMs: 20 * 60_000,
+  },
   states: {
     ready: 'Ready',
     inProgress: 'In Progress',
@@ -237,9 +242,18 @@ describe('decide: building', () => {
     expect(find(q, 'comment')).toMatchObject({ key: 'question-1' })
     expect(find(q, 'comment')?.body).toContain('A or B?')
     expect(find(q, 'set_state')?.state).toBe('needsInput')
+    // idle without the marker: a background gate may still run, so wait out the grace period
+    expect(
+      decide(b(), facts({ agent: 'idle', linearKey: 'inProgress', idleForMs: 19 * 60_000 }), ctx),
+    ).toEqual([])
     const s = decide(
       b(),
-      facts({ agent: 'idle', linearKey: 'inProgress', paneTail: 'last lines' }),
+      facts({
+        agent: 'idle',
+        linearKey: 'inProgress',
+        paneTail: 'last lines',
+        idleForMs: 20 * 60_000,
+      }),
       ctx,
     )
     expect(find(s, 'comment')?.key).toBe('stalled-1')
