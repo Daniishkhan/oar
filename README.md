@@ -194,7 +194,10 @@ The check names and environment above are examples: use the actual required stat
 and Boat environment for the application. Each configured expected check must be present and successful
 for the reviewed commit; canceled, skipped, neutral, pending, or missing checks do not count as
 success. With `requiredChecks: []`, every observed check must succeed. An explicit list is
-recommended because it also detects required checks that never reported. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
+recommended because it also detects required checks that never reported. Only a check run from a
+GitHub App in `checkApps` (default `["github-actions"]`) can satisfy a check; a commit status or
+another app's run can fail the gate but never pass it, because anyone holding a write token (the
+builder does) can post those. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
 choose `"deliveryMode": "merge"`; that is a different completion contract.
 
 For sandbox review, `reviewEnvName` must differ from the builder's `envName`. Prepare that Boat
@@ -337,6 +340,10 @@ Rules that keep the controller safe to restart at any moment:
 - A merge is attempted at most once per head SHA, and a reviewer failure is recorded so it never
   loops.
 - Nothing the agent or the PR controls may configure the controller or the reviewer.
+- Everything the controller posts to Linear or GitHub, and every evidence row, is scrubbed of
+  known token shapes (GitHub, OpenAI/Anthropic, boat, Linear, AWS, Slack, Tailscale), in case an
+  agent was steered into printing its environment. A plan's `document` must be a Markdown file
+  inside the plan directory, since its contents are published verbatim.
 - The reviewed SHA, required CI checks, merge revision, deployment, and verification must match.
 - A failed staging result cannot mark the issue Done; only successful revision-matched evidence can.
 - Issue/relation publication IDs are written locally before remote mutations and reused on retries.

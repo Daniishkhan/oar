@@ -141,7 +141,14 @@ describe('verified staging lifecycle', () => {
         stdout: JSON.stringify([
           {
             check_runs: [
-              { id: 1, name: 'test', head_sha: HEAD, status: 'completed', conclusion: 'success' },
+              {
+                id: 1,
+                name: 'test',
+                head_sha: HEAD,
+                status: 'completed',
+                conclusion: 'success',
+                app: { id: 15368, slug: 'github-actions' },
+              },
             ],
           },
         ]),

@@ -167,7 +167,7 @@ export interface Facts {
     pending: boolean
     passed: boolean
     missing?: string[]
-    checks?: Array<{ name: string; state: string; source: 'check' | 'status' }>
+    checks?: Array<{ name: string; state: string; source: 'check' | 'status'; app?: string }>
   } | null
   staging: WorkflowSnapshot | null
   verification: WorkflowSnapshot | null

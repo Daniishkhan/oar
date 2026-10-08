@@ -157,7 +157,12 @@ function worker(w: ReturnType<typeof world>) {
         {
           check_runs: (
             JSON.parse(checks.json) as { check_runs: Array<Record<string, unknown>> }
-          ).check_runs.map((check, index) => ({ id: index + 1, head_sha: 'abc', ...check })),
+          ).check_runs.map((check, index) => ({
+            id: index + 1,
+            head_sha: 'abc',
+            app: { id: 15368, slug: 'github-actions' },
+            ...check,
+          })),
         },
       ]),
     }))

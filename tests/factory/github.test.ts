@@ -204,6 +204,7 @@ describe('checkRuns', () => {
     head_sha: 'abc',
     status: 'completed',
     conclusion,
+    app: { id: 15368, slug: 'github-actions' },
   })
   const runs = (check_runs: unknown[], statuses: unknown[] = []) =>
     new FakeExec()
@@ -290,18 +291,47 @@ describe('checkRuns', () => {
     expect(await checkRuns(gh, 'abc')).toMatchObject({ passed: false, failed: ['test'] })
   })
 
-  it('legacy statuses can fail or satisfy configured checks', async () => {
+  it('legacy statuses can fail a check but never satisfy one', async () => {
     expect(
       await checkRuns(
         feed(runs([check('test')], [{ id: 1, context: 'legacy', state: 'error' }])),
         'abc',
       ),
     ).toMatchObject({ passed: false, failed: ['legacy'] })
+    // A builder holding the repo token can post a commit status under any name.
     const gh = new GhFeed(runs([], [{ id: 1, context: 'legacy', state: 'success' }]), null, null, {
       ...repo,
       requiredChecks: ['legacy'],
     })
-    expect(await checkRuns(gh, 'abc')).toMatchObject({ passed: true, missing: [] })
+    expect(await checkRuns(gh, 'abc')).toMatchObject({
+      passed: false,
+      pending: true,
+      missing: ['legacy'],
+    })
+    const spoofed = new GhFeed(
+      runs([check('checks')], [{ id: 1, context: 'checks', state: 'success' }]),
+      null,
+      null,
+      { ...repo, requiredChecks: ['checks'] },
+    )
+    expect(await checkRuns(spoofed, 'abc')).toMatchObject({ passed: true, missing: [] })
+  })
+  it('only a check run from a trusted GitHub App satisfies a check; any app can fail it', async () => {
+    const other = { ...check('test', 'success', 1), app: { id: 9, slug: 'other-ci' } }
+    const gh = new GhFeed(runs([other]), null, null, { ...repo, requiredChecks: ['test'] })
+    expect(await checkRuns(gh, 'abc')).toMatchObject({
+      passed: false,
+      pending: true,
+      missing: ['test'],
+    })
+    expect(await checkRuns(feed(runs([other])), 'abc')).toMatchObject({ passed: false })
+    const failing = { ...check('test', 'failure', 2), app: { id: 9, slug: 'other-ci' } }
+    expect(await checkRuns(feed(runs([check('test'), failing])), 'abc')).toMatchObject({
+      passed: false,
+      failed: ['test'],
+    })
+    const allowed = new GhFeed(runs([other]), null, null, { ...repo, checkApps: ['other-ci'] })
+    expect(await checkRuns(allowed, 'abc')).toMatchObject({ passed: true })
   })
 
   it('does not pass with no runs, missing pages, bad output or the wrong revision', async () => {

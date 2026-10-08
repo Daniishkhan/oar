@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { hostname } from 'node:os'
-import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 import { OarError, usage } from '../errors.js'
 import type { LinearClient } from './linear.js'
 import {
@@ -77,16 +77,26 @@ export function publicationSource(
 } {
   let document: { path: string; content: string } | undefined
   if (plan.document) {
-    if (isAbsolute(plan.document)) throw usage('plan document must be relative to the JSON file')
+    // The contents are published into Linear verbatim, so the document may only be a Markdown
+    // file beside the plan: never a path (or a symlink) that reaches the rest of the file system.
+    const dir = realpathSync(dirname(path))
+    const inside = (p: string) => p.startsWith(`${dir}${sep}`)
+    const target = resolve(dir, plan.document)
+    if (isAbsolute(plan.document) || !inside(target) || !target.endsWith('.md'))
+      throw usage(
+        `plan document ${plan.document} must be a .md file inside the plan directory`,
+        'for example "plan.md" next to the JSON file',
+      )
+    let content: string
     try {
-      document = {
-        path: plan.document,
-        content: readFileSync(resolve(dirname(path), plan.document), 'utf8'),
-      }
+      const real = realpathSync(target)
+      if (!inside(real)) throw new Error('resolves outside the plan directory')
+      content = readFileSync(real, 'utf8')
     } catch (e) {
       throw usage(`cannot read plan document ${plan.document}: ${(e as Error).message}`)
     }
-    if (!document.content.trim()) throw usage(`plan document ${plan.document} is empty`)
+    document = { path: plan.document, content }
+    if (!content.trim()) throw usage(`plan document ${plan.document} is empty`)
   }
   const contentHash = createHash('sha256')
     .update(JSON.stringify({ team: plan.team, plan: plan.plan, tickets: plan.tickets, document }))

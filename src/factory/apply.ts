@@ -7,7 +7,7 @@ import { ensureUp } from '../commands/vm.js'
 import { repoConfig, type RepoConfig } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
-import { redact, shq } from '../exec.js'
+import { redact, scrubSecrets, shq } from '../exec.js'
 import { ghRun, prSnapshot } from '../github.js'
 import {
   promptAgent,
@@ -80,12 +80,7 @@ const firstLine = (e: unknown) => ((e as Error).message ?? String(e)).split('\n'
 
 /** Registered secrets and GitHub tokens out, last lines only: safe to post on an issue. */
 const scrub = (text: string, lines = 6) =>
-  redact(text)
-    .replace(/\bgh[opsur]_[A-Za-z0-9]{20,}/g, '<redacted>')
-    .trim()
-    .split('\n')
-    .slice(-lines)
-    .join('\n')
+  scrubSecrets(text).trim().split('\n').slice(-lines).join('\n')
 
 const kebab = (s: string) =>
   s
@@ -169,12 +164,13 @@ export class Applier {
   /** Post a comment once per (issue, key); a crash between the reservation and Linear is retried with the same id. */
   async comment(row: IssueRow, key: string, body: string): Promise<void> {
     const { db, linear } = this.deps
+    const text = scrubSecrets(body)
     const existing = db.ownComment(row.id, key)
     if (existing?.status === 'sent') return
     const id = existing?.id ?? newCommentId()
-    if (!existing) db.reserveOwnComment(id, row.id, key, body)
+    if (!existing) db.reserveOwnComment(id, row.id, key, text)
     try {
-      await linear.createComment({ id, issueId: row.id, body })
+      await linear.createComment({ id, issueId: row.id, body: text })
       db.ownCommentSent(id)
     } catch (e) {
       if (e instanceof LinearError && /duplicate|already exists|unique/i.test(e.message)) {
@@ -513,12 +509,9 @@ export class Applier {
         commentSandboxId,
         ['pr', 'comment', String(row.prNumber), '--repo', cfg.github, '--body-file', '-'],
         {
-          input: findingsComment(out, {
-            sha,
-            runner: review.runner,
-            blocking: review.blocking,
-            next,
-          }),
+          input: scrubSecrets(
+            findingsComment(out, { sha, runner: review.runner, blocking: review.blocking, next }),
+          ),
         },
       )
       if (!posted.ok)

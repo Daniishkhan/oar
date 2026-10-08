@@ -153,7 +153,14 @@ describe('merge execution safety', () => {
         stdout: JSON.stringify([
           {
             check_runs: [
-              { id: 1, name: 'test', head_sha: 'head', status: 'completed', conclusion },
+              {
+                id: 1,
+                name: 'test',
+                head_sha: 'head',
+                status: 'completed',
+                conclusion,
+                app: { id: 15368, slug: 'github-actions' },
+              },
             ],
           },
         ]),

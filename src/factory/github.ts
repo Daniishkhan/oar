@@ -45,7 +45,7 @@ const CheckRun = z.looseObject({
   id: z.number(),
   name: z.string(),
   head_sha: z.string(),
-  app: z.looseObject({ id: z.number() }).optional(),
+  app: z.looseObject({ id: z.number(), slug: z.string().default('') }).optional(),
   status: z.string(),
   conclusion: z.string().nullable().default(null),
 })
@@ -166,7 +166,7 @@ export interface CheckSummary {
   missing: string[]
   pending: boolean
   passed: boolean
-  checks: Array<{ name: string; state: string; source: 'check' | 'status' }>
+  checks: Array<{ name: string; state: string; source: 'check' | 'status'; app?: string }>
 }
 
 /** Fetch every page, including legacy status contexts. Any failed read blocks the gate. */
@@ -198,6 +198,7 @@ export async function checkRuns(gh: GhFeed, sha: string): Promise<CheckSummary |
       name: run.name,
       state: run.status === 'completed' ? (run.conclusion ?? 'unknown') : 'pending',
       source: 'check' as const,
+      app: run.app?.slug ?? '',
     })),
     ...[...latestStatuses.values()].map((status) => ({
       name: status.context,
@@ -205,23 +206,35 @@ export async function checkRuns(gh: GhFeed, sha: string): Promise<CheckSummary |
       source: 'status' as const,
     })),
   ]
+  // Only a check run from a trusted GitHub App can satisfy a check: a commit status, or a check
+  // run from any other app, can be posted by whoever holds a write token (the builder does).
+  // Every source can still fail the gate.
+  const trusted = new Set(gh.repo.checkApps)
+  const trustedRun = (c: CheckSummary['checks'][number]) =>
+    c.source === 'check' && trusted.has(c.app ?? '')
   const required = gh.repo.requiredChecks
   const selected = required.length
     ? checks.filter((check) => required.includes(check.name))
     : checks
-  const missing = required.filter((name) => !checks.some((check) => check.name === name))
+  const names = required.length
+    ? required
+    : [...new Set(checks.filter(trustedRun).map((c) => c.name))]
+  const missing = names.filter((name) => !checks.some((c) => c.name === name && trustedRun(c)))
   const failed = [
     ...new Set(
       selected.filter((c) => !['success', 'pending'].includes(c.state)).map((c) => c.name),
     ),
   ]
   const pending = missing.length > 0 || selected.some((c) => c.state === 'pending')
+  const satisfied = names.every((name) =>
+    checks.some((c) => c.name === name && trustedRun(c) && c.state === 'success'),
+  )
   return {
     headSha: sha,
     failed,
     missing,
     pending,
-    passed: selected.length > 0 && !pending && !failed.length,
+    passed: names.length > 0 && !pending && !failed.length && satisfied,
     checks,
   }
 }

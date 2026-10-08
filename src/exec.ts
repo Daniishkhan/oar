@@ -77,5 +77,25 @@ export const registerSecret = (value: string | undefined) => {
 /** Replace every registered secret in a string before it reaches a terminal or a log. */
 export const redact = (s: string) => secrets.reduce((acc, v) => acc.split(v).join('<redacted>'), s)
 
+/** Token shapes with a recognisable prefix: GitHub, OpenAI/Anthropic, Slack, AWS, boat, Linear, Tailscale. */
+const TOKEN_PATTERNS = [
+  /\bgh[opsur]_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bboat_[A-Za-z0-9_-]{16,}/g,
+  /\blin_(?:api|oauth)_[A-Za-z0-9]{16,}/g,
+  /\btskey-[A-Za-z0-9-]{10,}/g,
+]
+
+/**
+ * `redact` plus the token shapes above. Applied to everything the controller posts to Linear or
+ * GitHub and to every evidence row: an agent steered by a malicious PR or issue could otherwise
+ * print its environment into a question, a pane tail or a review finding.
+ */
+export const scrubSecrets = (s: string) =>
+  TOKEN_PATTERNS.reduce((acc, re) => acc.replace(re, '<redacted>'), redact(s))
+
 export const commandExists = async (exec: Exec, cmd: string) =>
   (await exec.run('/bin/sh', ['-c', `command -v ${shq(cmd)}`])).code === 0

@@ -68,6 +68,11 @@ export const RepoSchema = z
     playwright: z.boolean().default(false),
     /** Exact check/status names required for merge; empty means every observed check must succeed. */
     requiredChecks: z.array(z.string().min(1)).default([]),
+    /**
+     * GitHub App slugs whose check runs may satisfy a check. A commit status or another app's run
+     * can still fail the gate but never pass it: anyone holding a write token can post those.
+     */
+    checkApps: z.array(z.string().min(1)).default(['github-actions']),
     /** Staging is the default completion contract; merge-only delivery must be explicitly selected. */
     deliveryMode: z.enum(['staging', 'merge']).default('staging'),
     /** GitHub Actions workflow that deploys the merged revision on `baseBranch`. */

@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { hostname } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
-import { redact } from '../exec.js'
+import { scrubSecrets } from '../exec.js'
 import type { TokenRecord, TokenStore } from './linear.js'
 import {
   ACTIVE_PHASES,
@@ -337,7 +337,7 @@ export class FactoryDb {
 
   /** Append evidence on a change, preserving all prior revisions and failed attempts. */
   recordEvidence(issueId: string, stage: string, data: Record<string, unknown>): void {
-    const json = redact(JSON.stringify(data))
+    const json = scrubSecrets(JSON.stringify(data))
     const last = this.db
       .prepare(
         'SELECT data FROM evidence WHERE issue_id = ? AND stage = ? ORDER BY id DESC LIMIT 1',

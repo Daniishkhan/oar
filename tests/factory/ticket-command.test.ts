@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ticketCmd } from '../../src/commands/ticket.js'
@@ -18,6 +18,22 @@ describe('ticket command preview', () => {
     expect(w.out.join('\n')).toMatch(/Snapshot SHA-256: `[0-9a-f]{64}`/)
     expect(readFileSync(path, 'utf8')).toBe(original)
     expect(existsSync(`${path}.publish.lock`)).toBe(false)
+  })
+
+  it('refuses a plan document that is not a Markdown file inside the plan directory', async () => {
+    const w = world()
+    const dir = join(w.home, 'plans')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, 'tickets.json')
+    writeFileSync(join(w.home, 'env.md'), 'SECRET=1')
+    for (const document of ['../env.md', 'notes.txt']) {
+      writeFileSync(path, JSON.stringify({ ...EXAMPLE_PLAN, document }))
+      await expect(ticketCmd(w.ctx, ['check', path])).rejects.toThrow('inside the plan directory')
+    }
+    symlinkSync(join(w.home, 'env.md'), join(dir, 'link.md'))
+    writeFileSync(path, JSON.stringify({ ...EXAMPLE_PLAN, document: 'link.md' }))
+    await expect(ticketCmd(w.ctx, ['check', path])).rejects.toThrow('outside the plan directory')
+    expect(w.out.join('\n')).not.toContain('SECRET=1')
   })
 
   it('rejects missing source documents during dry run', async () => {
