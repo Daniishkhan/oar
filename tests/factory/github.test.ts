@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_CONFIG, type RepoConfig } from '../../src/config.js'
-import { checkRuns, GhFeed, OAR_MARKER, reviewFeed, workflowRun } from '../../src/factory/github.js'
+import {
+  checkRuns,
+  GhFeed,
+  OAR_MARKER,
+  prFiles,
+  protectedChanges,
+  reviewFeed,
+  workflowRun,
+} from '../../src/factory/github.js'
 import { FakeExec } from '../fakes/exec.js'
 
 const repo: RepoConfig = { ...DEFAULT_CONFIG.repos.engine!, github: 'o/r', requiredChecks: [] }
@@ -281,6 +289,22 @@ describe('checkRuns', () => {
     expect(exec.lines().every((line) => line.includes('--paginate --slurp'))).toBe(true)
   })
 
+  it('keeps a failing run from another check suite even when a newer run shares its name', async () => {
+    const gh = feed(
+      runs([
+        { ...check('test', 'failure', 1), check_suite: { id: 10 } },
+        { ...check('test', 'success', 2), check_suite: { id: 11 } },
+      ]),
+    )
+    expect(await checkRuns(gh, 'abc')).toMatchObject({ passed: false, failed: ['test'] })
+    const rerun = feed(
+      runs([
+        { ...check('test', 'failure', 1), check_suite: { id: 10 } },
+        { ...check('test', 'success', 2), check_suite: { id: 10 } },
+      ]),
+    )
+    expect(await checkRuns(rerun, 'abc')).toMatchObject({ passed: true, failed: [] })
+  })
   it('does not let another GitHub app mask a failed check with the same name', async () => {
     const gh = feed(
       runs([
@@ -423,5 +447,37 @@ describe('reviewFeed and the controller own comments', () => {
     const r = await reviewFeed(feed(exec), 7, null)
     expect(r.comments.map((c) => c.id)).toEqual(['conv-4'])
     expect(r.cursor).toBe('2026-01-02T00:00:00Z')
+  })
+})
+
+describe('prFiles and protectedChanges', () => {
+  it('lists every touched path across pages, with the old name of a rename', async () => {
+    const exec = new FakeExec().on(
+      /gh api --paginate --slurp repos\/o\/r\/pulls\/7\/files/,
+      json([
+        [
+          { filename: 'src/a.ts' },
+          { filename: 'docs/b.md', previous_filename: '.github/CODEOWNERS' },
+        ],
+        [{ filename: 'src/a.ts' }],
+      ]),
+    )
+    expect(await prFiles(feed(exec), 7)).toEqual(['src/a.ts', 'docs/b.md', '.github/CODEOWNERS'])
+    expect(await prFiles(feed(new FakeExec()), 7)).toBeNull()
+  })
+  it('matches directories by prefix and files exactly', () => {
+    const files = [
+      '.github/workflows/ci.yml',
+      'AGENTS.md',
+      'src/AGENTS.md',
+      'docs/.github/x',
+      '.claude/settings.json',
+      'README.md',
+    ]
+    expect(protectedChanges(files, ['.github/', 'AGENTS.md', '.claude/'])).toEqual([
+      '.github/workflows/ci.yml',
+      'AGENTS.md',
+      '.claude/settings.json',
+    ])
   })
 })

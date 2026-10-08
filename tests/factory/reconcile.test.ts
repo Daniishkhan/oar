@@ -68,6 +68,7 @@ const facts = (over: Partial<Facts> = {}): Facts => ({
   nowIso: NOW,
   slotFree: true,
   deliveryBusy: false,
+  protectedChanges: [],
   jobRunning: false,
   jobAgeMs: 0,
   blocked: false,
@@ -785,6 +786,14 @@ describe('decide: automated review and merge', () => {
   it('waits while another issue of the repo is between merge and verified delivery', () => {
     expect(decide(reviewed(), quiet({ deliveryBusy: true }), ctx)).toEqual([])
     expect(decide(reviewed(), quiet(), ctx).map((a) => a.kind)).toEqual(['merge'])
+  })
+  it('leaves a PR that changes protected paths to a human, after waiting for the file list', () => {
+    expect(decide(reviewed(), quiet({ protectedChanges: null }), ctx)).toEqual([])
+    const a = decide(reviewed(), quiet({ protectedChanges: ['.github/workflows/ci.yml'] }), ctx)
+    expect(find(a, 'comment')?.key).toBe('protected-abc123')
+    expect(find(a, 'comment')?.body).toContain('.github/workflows/ci.yml')
+    expect(find(a, 'set_state')?.state).toBe('needsInput')
+    expect(a.some((x) => x.kind === 'merge')).toBe(false)
   })
   it('attempts a merge at most once per head and flags one that never finished', () => {
     expect(

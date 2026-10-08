@@ -73,6 +73,15 @@ export const RepoSchema = z
      * can still fail the gate but never pass it: anyone holding a write token can post those.
      */
     checkApps: z.array(z.string().min(1)).default(['github-actions']),
+    /**
+     * Paths the factory never merges on its own: a PR touching them goes to Needs Input for a
+     * human merge. CI runs the workflow version from the PR, so a PR could make its own checks
+     * green, and the reviewer reads the agent instruction files from it. An entry ending in "/"
+     * matches a directory.
+     */
+    protectedPaths: z
+      .array(z.string().min(1))
+      .default(['.github/', 'AGENTS.md', 'CLAUDE.md', '.claude/', '.codex/']),
     /** Staging is the default completion contract; merge-only delivery must be explicitly selected. */
     deliveryMode: z.enum(['staging', 'merge']).default('staging'),
     /** GitHub Actions workflow that deploys the merged revision on `baseBranch`. */

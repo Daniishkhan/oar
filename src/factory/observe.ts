@@ -6,7 +6,15 @@ import { agentState, readAgent, type LiveAgent } from '../runner.js'
 import { loadState, type Task } from '../state.js'
 import { cleanTail, questionPath } from './brief.js'
 import type { FactoryDb } from './db.js'
-import { checkRuns, GhFeed, reviewFeed, verificationRequestKey, workflowRun } from './github.js'
+import {
+  checkRuns,
+  GhFeed,
+  prFiles,
+  protectedChanges,
+  reviewFeed,
+  verificationRequestKey,
+  workflowRun,
+} from './github.js'
 import type { Jobs } from './jobs.js'
 import { DELIVERY_PHASES, SLOT_PHASES, type Facts, type IssueRow, type StateKey } from './types.js'
 
@@ -65,6 +73,7 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
     nowIso,
     slotFree: deps.db.countInPhases(row.repo, SLOT_PHASES) < deps.concurrency(row.repo),
     deliveryBusy: false,
+    protectedChanges: null,
     jobRunning: deps.jobs.has(row.id),
     jobAgeMs: row.jobStartedAt ? Math.max(0, ctx.now() - Date.parse(row.jobStartedAt)) : 0,
     blocked: row.blockedBy.some((id) => {
@@ -141,6 +150,10 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
     facts.review = await reviewFeed(gh, facts.pr.number, row.reviewCursor).catch(() => facts.review)
     const ci = await checkRuns(gh, facts.pr.headSha).catch(() => null)
     if (ci) facts.ci = ci
+    if (ci?.passed) {
+      const files = await prFiles(gh, facts.pr.number).catch(() => null)
+      facts.protectedChanges = files ? protectedChanges(files, cfg.protectedPaths) : null
+    }
   }
   return facts
 }

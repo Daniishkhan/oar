@@ -183,6 +183,8 @@ export interface Facts {
    * second merge would move the base branch under that verification: one delivery at a time.
    */
   deliveryBusy: boolean
+  /** Protected paths the PR touches (see repos.<r>.protectedPaths); null when not read this tick. */
+  protectedChanges: string[] | null
   jobRunning: boolean
   jobAgeMs: number
   /** Issues this one is blocked by that are not done yet. */

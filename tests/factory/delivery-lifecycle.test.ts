@@ -154,6 +154,7 @@ describe('verified staging lifecycle', () => {
         ]),
       })
       .on(/\/statuses\?/, { stdout: '[[]]' })
+      .on(/\/files\?/, { stdout: '[[]]' })
       .on('gh api --method POST', (call) => {
         dispatches++
         requestKey = call.args.find((arg) => arg.startsWith('inputs[oar_run_id]='))!.split('=')[1]!

@@ -376,6 +376,17 @@ function reviewGate(ctx: DecideContext, row: IssueRow, f: Facts): Action[] {
     )
   const held = row.labels.some((l) => l.toLowerCase() === ctx.holdLabel.toLowerCase())
   if (held || !ctx.autoMerge) return []
+  // CI runs the workflow version from the PR, and the reviewer reads the agent instruction files
+  // in it, so a PR that changes either is a human's merge. Not read this tick: wait.
+  if (f.protectedChanges === null) return []
+  if (f.protectedChanges.length)
+    return needsInput(
+      `protected-${head}`,
+      withMention(
+        ctx,
+        `${pr.url} changes protected paths (${f.protectedChanges.join(', ')}), which the factory never merges on its own. Review and merge it by hand, or reply here once a push without those changes is in.`,
+      ),
+    )
   // The merge job re-checks this under the repo lock; deciding it here keeps the tick quiet.
   if (f.deliveryBusy) return []
   return [

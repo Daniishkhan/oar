@@ -28,7 +28,7 @@ import {
   roundToken,
 } from './brief.js'
 import type { FactoryDb } from './db.js'
-import { checkRuns, GhFeed, verificationRequestKey } from './github.js'
+import { checkRuns, GhFeed, prFiles, protectedChanges, verificationRequestKey } from './github.js'
 import type { Jobs } from './jobs.js'
 import { LinearClient, LinearError, newCommentId } from './linear.js'
 import { deliveryBusy } from './observe.js'
@@ -695,12 +695,17 @@ export class Applier {
         throw new Error('the current head has no passing automated review')
       if (cfg.deliveryMode === 'staging' && (!cfg.deployWorkflow || !cfg.verifyWorkflow))
         throw new Error('staging delivery requires deployWorkflow and verifyWorkflow')
-      const ci = await checkRuns(new GhFeed(this.ctx.exec, this.ctx.boat, sandboxId, cfg), a.sha)
+      const feed = new GhFeed(this.ctx.exec, this.ctx.boat, sandboxId, cfg)
+      const ci = await checkRuns(feed, a.sha)
       if (ci) db.recordEvidence(row.id, 'ci', { ...ci, sha: a.sha })
       if (!ci?.passed || ci.pending || ci.headSha !== a.sha)
         throw new Error(
           `required checks are not successful for ${a.sha}${ci?.missing.length ? `; missing: ${ci.missing.join(', ')}` : ''}`,
         )
+      const files = await prFiles(feed, a.number)
+      const guarded = files ? protectedChanges(files, cfg.protectedPaths) : null
+      if (!guarded) throw new Error('could not read the list of files the PR changes')
+      if (guarded.length) throw new Error(`the PR changes protected paths: ${guarded.join(', ')}`)
       if (a.isDraft) {
         const ready = await gh(['pr', 'ready', String(a.number), '--repo', cfg.github])
         if (!ready.ok) throw new Error(`gh pr ready: ${ready.stderr || ready.stdout}`)

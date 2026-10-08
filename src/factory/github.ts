@@ -46,6 +46,7 @@ const CheckRun = z.looseObject({
   name: z.string(),
   head_sha: z.string(),
   app: z.looseObject({ id: z.number(), slug: z.string().default('') }).optional(),
+  check_suite: z.looseObject({ id: z.number() }).optional(),
   status: z.string(),
   conclusion: z.string().nullable().default(null),
 })
@@ -185,7 +186,9 @@ export async function checkRuns(gh: GhFeed, sha: string): Promise<CheckSummary |
   // GitHub returns status history, so retain the newest entry per context; likewise rerun checks.
   const latestRuns = new Map<string, z.infer<typeof CheckRun>>()
   for (const run of runs) {
-    const key = `${run.app?.id ?? 'unknown'}:${run.name}`
+    // A rerun replaces its predecessor within one check suite; a same-named job in another
+    // workflow (another suite) is a separate check and must not mask it.
+    const key = `${run.app?.id ?? 'unknown'}:${run.check_suite?.id ?? 'suite'}:${run.name}`
     if (!latestRuns.has(key) || latestRuns.get(key)!.id < run.id) latestRuns.set(key, run)
   }
   const latestStatuses = new Map<string, z.infer<typeof CommitStatus>>()
@@ -293,4 +296,29 @@ export function verificationRequestKey(
     .update(JSON.stringify([issueId, sha, deploymentRunId, deploymentAttempt, startedAt]))
     .digest('hex')
     .slice(0, 24)}`
+}
+
+const PrFile = z.looseObject({ filename: z.string(), previous_filename: z.string().optional() })
+
+/** Every path the PR touches, with the old name of a rename. Null when the list could not be read. */
+export async function prFiles(gh: GhFeed, number: number): Promise<string[] | null> {
+  const [o, r] = gh.repo.github.split('/')
+  const json = await gh.api(`repos/${o}/${r}/pulls/${number}/files?per_page=100`, true)
+  if (json === null) return null
+  const p = z.array(z.array(PrFile)).safeParse(Array.isArray(json) ? json : [json])
+  if (!p.success) return null
+  return [
+    ...new Set(
+      p.data
+        .flat()
+        .flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]),
+    ),
+  ]
+}
+
+/** The touched paths that match a protected entry: a directory when the entry ends in "/". */
+export function protectedChanges(files: readonly string[], patterns: readonly string[]): string[] {
+  return files.filter((file) =>
+    patterns.some((p) => (p.endsWith('/') ? file.startsWith(p) : file === p)),
+  )
 }

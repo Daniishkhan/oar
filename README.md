@@ -197,7 +197,10 @@ success. With `requiredChecks: []`, every observed check must succeed. An explic
 recommended because it also detects required checks that never reported. Only a check run from a
 GitHub App in `checkApps` (default `["github-actions"]`) can satisfy a check; a commit status or
 another app's run can fail the gate but never pass it, because anyone holding a write token (the
-builder does) can post those. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
+builder does) can post those. A PR that touches `protectedPaths` (default `.github/`,
+`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.codex/`) is never merged by the factory: CI runs the
+workflow version from the PR, so a PR could make its own checks green, and the reviewer reads the
+instruction files from it. Such an issue goes to Needs Input for a human merge. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
 choose `"deliveryMode": "merge"`; that is a different completion contract.
 
 For sandbox review, `reviewEnvName` must differ from the builder's `envName`. Prepare that Boat
