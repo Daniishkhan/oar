@@ -55,3 +55,6 @@ in Backlog, where nothing happens until a human moves one to Todo.
 - If `tickets.json.publish.lock` exists, stop and tell the user to confirm that no other
   publisher is running before removing it.
 - Labels must already exist in Linear; a missing one produces a notice and is left off.
+- Every issue is assigned to the configured user (`factory.linear.assignee`, default the git
+  identity email); nothing to do, but mention it in the report if the command says no user
+  matched.

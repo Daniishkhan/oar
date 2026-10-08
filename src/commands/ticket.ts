@@ -30,6 +30,10 @@ export function ticketLinear(ctx: Ctx): LinearClient {
   })
 }
 
+/** Who new issues are assigned to: the configured assignee, else the git identity's email. */
+export const ticketAssignee = (ctx: Ctx): string | undefined =>
+  ctx.config.factory.linear.assignee ?? ctx.config.gitIdentity.email
+
 /** Show what `create` would make, without touching Linear. */
 export function ticketDryRun(ctx: Ctx, plan: PlanFile, publication?: PublicationContext): void {
   const out = ctx.io.out
@@ -73,7 +77,7 @@ export function ticketDryRun(ctx: Ctx, plan: PlanFile, publication?: Publication
       `note: ${long.length} criteria over 200 characters read badly on a Linear card; one checkable sentence each, with the detail under Context:\n  ${long.join('\n  ')}`,
     )
   out(
-    `${order.length} ticket(s)${plan.plan ? ' under one plan issue' : ''} for team ${plan.team}, created in Backlog. Nothing was sent to Linear.`,
+    `${order.length} ticket(s)${plan.plan ? ' under one plan issue' : ''} for team ${plan.team}, created in Backlog and assigned to ${ticketAssignee(ctx) ?? 'nobody'}. Nothing was sent to Linear.`,
   )
 }
 
@@ -90,7 +94,13 @@ export async function ticketCreate(
     out(
       `note: team ${plan.team} is not in factory.linear.teams, so the controller will not build these tickets`,
     )
-  const result = await publishPlan({ path, linear, now: ctx.now, notice: out })
+  const result = await publishPlan({
+    path,
+    linear,
+    now: ctx.now,
+    notice: out,
+    assignee: ticketAssignee(ctx),
+  })
   if (result.parent) {
     const p = result.parent
     out(`${p.identifier}  [${SPEC_LABEL}] ${p.title}  ${p.url}`)
@@ -114,7 +124,12 @@ export async function ticketCmd(ctx: Ctx, args: string[]): Promise<number> {
     case 'refresh': {
       const path = rest.find((a) => !a.startsWith('--'))
       if (!path) throw usage('oar ticket refresh <plan.json>')
-      const result = await refreshPlan({ path, linear: ticketLinear(ctx) })
+      const result = await refreshPlan({
+        path,
+        linear: ticketLinear(ctx),
+        assignee: ticketAssignee(ctx),
+        notice: ctx.io.out,
+      })
       if (result.parent)
         ctx.io.out(`${result.parent.identifier}  ${result.parent.title}  ${result.parent.url}`)
       for (const t of result.tickets) ctx.io.out(`${t.identifier}  ${t.title}  ${t.url}`)

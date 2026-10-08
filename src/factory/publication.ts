@@ -35,6 +35,7 @@ export type PublicationLinear = Pick<
   | 'createRelation'
   | 'updateIssue'
   | 'labelId'
+  | 'userId'
 >
 type PublishedIssue = IssueRef & { id: string; url: string }
 
@@ -186,11 +187,28 @@ function lockPlan(path: string): () => void {
  * Linear's public SDK schema supports UUID v4 `id` on issue and relation create inputs:
  * https://github.com/linear/linear (published @linear/sdk 97.1.0).
  */
+/** The Linear user to assign to, by email or username; a miss is a notice, not a failure. */
+async function resolveAssignee(
+  linear: PublicationLinear,
+  who: string | undefined,
+  notice: (message: string) => void,
+): Promise<string | null> {
+  if (!who) return null
+  const id = await linear.userId(who)
+  if (!id)
+    notice(
+      `note: no Linear user matches "${who}"; the issues stay unassigned (factory.linear.assignee takes an email or a username)`,
+    )
+  return id
+}
+
 export async function publishPlan(options: {
   path: string
   linear: PublicationLinear
   now?: () => number
   notice?: (message: string) => void
+  /** Email or username of the Linear user every new issue is assigned to. */
+  assignee?: string
 }): Promise<PublicationResult> {
   const path = realpathSync(options.path)
   const release = lockPlan(path)
@@ -294,6 +312,7 @@ export async function publishPlan(options: {
       states.find((s) => s.type === 'backlog' && s.name === 'Backlog') ??
       states.find((s) => s.type === 'backlog')
     if (!backlog) throw new OarError('config', `team ${plan.team} has no backlog state`)
+    const assigneeId = await resolveAssignee(linear, options.assignee, notice)
 
     const getExisting = async (
       operationId: string | undefined,
@@ -334,6 +353,7 @@ export async function publishPlan(options: {
             title: plan.plan.title,
             description: renderPlan(plan.plan, [], context),
             stateId: backlog.id,
+            ...(assigneeId ? { assigneeId } : {}),
             ...(spec ? { labelIds: [spec] } : {}),
           })),
           title: plan.plan.title,
@@ -367,6 +387,7 @@ export async function publishPlan(options: {
               publication: { ...context, taskKey: t.key },
             }),
             stateId: backlog.id,
+            ...(assigneeId ? { assigneeId } : {}),
             ...(parent ? { parentId: parent.id } : {}),
             ...(labelIds.length ? { labelIds } : {}),
             ...(t.priority !== undefined ? { priority: t.priority } : {}),
@@ -432,11 +453,13 @@ export async function publishPlan(options: {
 export async function refreshPlan(options: {
   path: string
   linear: PublicationLinear
+  assignee?: string
+  notice?: (message: string) => void
 }): Promise<{ parent: PublishedIssue | null; tickets: Array<PublishedIssue & { key: string }> }> {
   const path = realpathSync(options.path)
   const release = lockPlan(path)
   try {
-    return await refreshLocked(path, options.linear)
+    return await refreshLocked(path, options.linear, options.assignee, options.notice ?? (() => {}))
   } finally {
     release()
   }
@@ -445,9 +468,12 @@ export async function refreshPlan(options: {
 async function refreshLocked(
   path: string,
   linear: PublicationLinear,
+  assignee: string | undefined,
+  notice: (message: string) => void,
 ): Promise<{ parent: PublishedIssue | null; tickets: Array<PublishedIssue & { key: string }> }> {
   const plan = readPlanFile(path)
   const source = publicationSource(path, plan)
+  const assigneeId = await resolveAssignee(linear, assignee, notice)
   if (!plan.publication)
     throw new OarError(
       'state_invalid',
@@ -490,6 +516,7 @@ async function refreshLocked(
   }
   for (const t of order)
     await linear.updateIssue(made.get(t.key)!.id, {
+      ...(assigneeId ? { assigneeId } : {}),
       description: renderTicket(t, {
         deps: t.dependsOn.map((d) => made.get(d)!),
         plan: parent,
@@ -498,6 +525,7 @@ async function refreshLocked(
     })
   if (parent && plan.plan)
     await linear.updateIssue(parent.id, {
+      ...(assigneeId ? { assigneeId } : {}),
       description: renderPlan(
         plan.plan,
         order.map((t) => ({

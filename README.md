@@ -152,7 +152,9 @@ session the path. Publishing is `/oar-tickets <plan.md>` ([skill](skills/oar-tic
 a user-only skill that runs in its own forked context, writes `tickets.json` beside the plan with
 `"document": "plan.md"`, and runs `oar ticket check` and `oar ticket create`. It also runs from a
 fresh terminal as `claude -p "/oar-tickets <path>"`. Each half can be redone alone: re-plan without
-touching Linear, or re-publish a saved plan without re-planning. Publishing creates a parent
+touching Linear, or re-publish a saved plan without re-planning. Every issue is assigned to
+`factory.linear.assignee` (a Linear email or username), by default the `gitIdentity` email;
+`oar ticket refresh` applies it to issues published earlier. Publishing creates a parent
 issue labelled `spec`, one Backlog issue per task, and dependency links. The plan's full Markdown
 snapshot and content hash are embedded in each task, so workers can read unpushed planning
 content. Required code dependencies still need to be pushed.

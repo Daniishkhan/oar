@@ -368,6 +368,7 @@ export class LinearClient {
     parentId?: string
     labelIds?: string[]
     priority?: number
+    assigneeId?: string
   }): Promise<{ id: string; identifier: string; url: string }> {
     const data = await this.query(
       `mutation CreateIssue($input: IssueCreateInput!) {
@@ -439,6 +440,27 @@ export class LinearClient {
       if (e instanceof LinearError && e.code === 'notfound') return null
       throw e
     }
+  }
+
+  /** The id of the workspace user whose email, username or name matches, ignoring case. */
+  async userId(who: string): Promise<string | null> {
+    const wanted = who.trim()
+    const filter = wanted.includes('@')
+      ? { email: { eqIgnoreCase: wanted } }
+      : { or: [{ displayName: { eqIgnoreCase: wanted } }, { name: { eqIgnoreCase: wanted } }] }
+    const data = await this.query(
+      `query Users($filter: UserFilter!) {
+        users(filter: $filter, first: 20) { nodes { id name displayName email active } }
+      }`,
+      { filter },
+      z.looseObject({
+        users: z.looseObject({
+          nodes: z.array(z.looseObject({ id: z.string(), active: z.boolean().default(true) })),
+        }),
+      }),
+    )
+    const user = data.users.nodes.find((u) => u.active) ?? data.users.nodes[0]
+    return user?.id ?? null
   }
 
   /**

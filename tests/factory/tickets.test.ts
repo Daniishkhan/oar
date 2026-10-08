@@ -67,6 +67,12 @@ class FakeLinear {
     this.calls.push(`label ${name}`)
     return this.labels.has(name) ? `label-${name}` : null
   }
+  async userId(who: string) {
+    const w = who.toLowerCase()
+    return ['danish@example.com', 'danishafzalkhan@gmail.com', 'danish'].includes(w)
+      ? 'user-danish'
+      : null
+  }
   async createIssue(input: {
     id?: string
     title: string
@@ -74,6 +80,7 @@ class FakeLinear {
     stateId?: string
     parentId?: string
     labelIds?: string[]
+    assigneeId?: string
   }) {
     this.beforeCreate?.(input)
     if (this.failOnCreate === input.title) throw new Error('boom')
@@ -85,6 +92,7 @@ class FakeLinear {
       title: input.title,
       url: `https://linear.app/x/${identifier}`,
       description: input.description,
+      assigneeId: input.assigneeId ?? null,
     }
     this.issues.set(identifier, issue)
     this.calls.push(
@@ -120,10 +128,11 @@ class FakeLinear {
       throw new Error('relation response lost')
     }
   }
-  async updateIssue(id: string, input: { description?: string }) {
+  async updateIssue(id: string, input: { description?: string; assigneeId?: string }) {
     this.calls.push(`update ${this.displayId(id)}`)
     const i = [...this.issues.values()].find((x) => x.id === id)
     if (i && input.description) i.description = input.description
+    if (i && input.assigneeId) i.assigneeId = input.assigneeId
   }
 }
 
@@ -413,6 +422,26 @@ describe('oar ticket create', () => {
     plan.tickets[1]!.questions = ['Which threshold?']
     expect(publicationSource(path, plan).contentHash).not.toBe(before)
     void w
+  })
+
+  it('assigns the plan and its tickets to the configured user, by email or username', async () => {
+    const { w, path, linear } = setup()
+    w.ctx.config.factory.linear.assignee = 'danish@example.com'
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    for (const id of ['CNO-1', 'CNO-2', 'CNO-3'])
+      expect(linear.issues.get(id)!.assigneeId).toBe('user-danish')
+    for (const issue of linear.issues.values()) issue.assigneeId = null
+    await refreshPlan({ path, linear: linear as unknown as LinearClient, assignee: 'Danish' })
+    for (const id of ['CNO-1', 'CNO-2', 'CNO-3'])
+      expect(linear.issues.get(id)!.assigneeId).toBe('user-danish')
+  })
+
+  it('says so and goes on when no Linear user matches the assignee', async () => {
+    const { w, path, linear } = setup()
+    w.ctx.config.factory.linear.assignee = 'nobody@example.com'
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    expect(w.out.join('\n')).toContain('no Linear user matches "nobody@example.com"')
+    expect(linear.issues.get('CNO-2')!.assigneeId).toBeNull()
   })
 
   it('resumes after a failure without creating anything twice', async () => {

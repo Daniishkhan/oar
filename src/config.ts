@@ -134,6 +134,8 @@ export const FactorySchema = z.object({
     .object({
       /** Linear team key → repo key. */
       teams: z.record(z.string(), z.string()).default({ ENG: 'engine', CNO: 'cno' }),
+      /** Who `oar ticket create` assigns new issues to: a Linear user's email or username. Default: `gitIdentity.email`. */
+      assignee: z.string().min(1).optional(),
       /** Workflow state names per logical state; created by `oar factory setup` when missing. */
       states: z
         .object({
