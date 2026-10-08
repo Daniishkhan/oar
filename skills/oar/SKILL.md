@@ -62,12 +62,12 @@ Do not also `oar task dispatch` factory-owned work: both would address the same 
 ## Planning work for the factory
 
 When the user plans a change with you (usually in plan mode) and wants the factory to build it,
-follow [tickets.md](tickets.md): save `plan.md` and `tickets.json` under
-`~/.local/state/oar/plans/<slug>/` (in the repo only when its documentation policy allows),
-then run `oar ticket check <file>` and `oar ticket create <file>` once publication is authorized.
-Honor authorization already given in the conversation. The tickets land in
-Backlog, each with Goal, Jobs to be done, Functional and Non-functional criteria, Scope,
-Decisions and a Staging check; the user moves them to Todo.
+follow [tickets.md](tickets.md): shape the plan as tickets, let approval save it under
+`~/.local/state/oar/plans/<date>-<slug>/plan.md` (the oar hook does this; otherwise save it
+there yourself), and leave publishing to `/oar-tickets <plan.md>`, which runs in its own
+context, writes `tickets.json` beside the plan, and runs `oar ticket check` and
+`oar ticket create`. The tickets land in Backlog, each with Goal, Jobs to be done, Functional
+and Non-functional criteria, Scope, Decisions and a Staging check; the user moves them to Todo.
 
 ## Commands
 

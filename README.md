@@ -39,10 +39,31 @@ agent state, the PR on GitHub, and the done marker on the VM.
 
 ## Setup
 
-1. `pnpm install && pnpm install:local` links `~/.local/bin/oar` and copies the skill into
-   `~/.claude/skills/oar` and `~/.agents/skills/oar`. An existing regular executable is never
-   replaced; move it aside explicitly if necessary. To smoke-test without a real install:
-   `pnpm build && node scripts/install-local.mjs --home /tmp/oar-install-test`.
+1. `pnpm install && pnpm install:local` links `~/.local/bin/oar` and copies the skills
+   (`oar`, `oar-tickets`) into `~/.claude/skills/` and `~/.agents/skills/`. An existing regular
+   executable is never replaced; move it aside explicitly if necessary. To smoke-test without a
+   real install: `pnpm build && node scripts/install-local.mjs --home /tmp/oar-install-test`.
+   Then register the plan hook and the clear-context approval in `~/.claude/settings.json`:
+
+   ```json
+   {
+     "showClearContextOnPlanAccept": true,
+     "hooks": {
+       "PostToolUse": [
+         {
+           "matcher": "ExitPlanMode",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "python3 \"$HOME/.claude/skills/oar/hooks/save-plan.py\""
+             }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
 2. `~/.config/oar/env` with `BOAT_API_KEY=boat_…` (mode 600). `~/.config/oar/config.json` is
    written with the shipped defaults on first run; edit repos there.
 3. In the boat dashboard: connect GitHub and install boat's GitHub App on the organisation, then
@@ -122,10 +143,16 @@ its own and notify you; `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` in `~/.config/
 PR automation so a merge does **not** mark an issue Done. The controller owns completion
 after delivery verification; an independent Linear automation must not bypass it.
 
-Tickets come from a local planning session with Claude or Codex using the oar skill's
-[tickets.md](skill/tickets.md). The plan is saved as `plan.md` and `tickets.json` under
-`~/.local/state/oar/plans/<slug>/` (in the repository only when its documentation policy allows),
-with `"document": "plan.md"` in the JSON. Publishing creates a parent
+Tickets come from a planning session in Claude Code, in three decoupled steps. Plan mode,
+opened with `/oar`, shapes the work as tickets ([tickets.md](skills/oar/tickets.md)); research
+goes to the Explore subagent so it stays out of the planning context. Approving the plan runs the
+[save-plan hook](skills/oar/hooks/save-plan.py), which copies Claude Code's plan file (random
+name, deleted after 30 days) to `~/.local/state/oar/plans/<date>-<slug>/plan.md` and tells the
+session the path. Publishing is `/oar-tickets <plan.md>` ([skill](skills/oar-tickets/SKILL.md)):
+a user-only skill that runs in its own forked context, writes `tickets.json` beside the plan with
+`"document": "plan.md"`, and runs `oar ticket check` and `oar ticket create`. It also runs from a
+fresh terminal as `claude -p "/oar-tickets <path>"`. Each half can be redone alone: re-plan without
+touching Linear, or re-publish a saved plan without re-planning. Publishing creates a parent
 issue labelled `spec`, one Backlog issue per task, and dependency links. The plan's full Markdown
 snapshot and content hash are embedded in each task, so workers can read unpushed planning
 content. Required code dependencies still need to be pushed.
@@ -316,16 +343,16 @@ This validates oar itself; application staging workflows remain separately confi
 
 ### Code map
 
-| Path                                                                                       | What                                                                                                                    |
-| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| [src/cli.ts](src/cli.ts)                                                                   | Argument parsing, help text, exit codes; the only place that exits                                                      |
-| [src/config.ts](src/config.ts)                                                             | Config schema and shipped defaults, secrets from `~/.config/oar/env`                                                    |
-| [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client                                |
-| [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                                               |
-| [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                                                   |
-| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor`, `factory` and `ticket` subcommands                                           |
-| [src/factory/](src/factory)                                                                | The controller, below                                                                                                   |
-| [setup/](setup), [vm/](vm), [templates/](templates), [skill/](skill)                       | VM setup scripts and units, files copied onto VMs, brief/reviewer/verification templates, shared Claude and Codex skill |
+| Path                                                                                       | What                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [src/cli.ts](src/cli.ts)                                                                   | Argument parsing, help text, exit codes; the only place that exits                                                                                                     |
+| [src/config.ts](src/config.ts)                                                             | Config schema and shipped defaults, secrets from `~/.config/oar/env`                                                                                                   |
+| [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client                                                                               |
+| [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                                                                                              |
+| [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                                                                                                  |
+| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor`, `factory` and `ticket` subcommands                                                                                          |
+| [src/factory/](src/factory)                                                                | The controller, below                                                                                                                                                  |
+| [setup/](setup), [vm/](vm), [templates/](templates), [skills/](skills)                     | VM setup scripts and units, files copied onto VMs, brief/reviewer/verification templates, the `oar` and `oar-tickets` skills (Claude Code and Codex) and the plan hook |
 
 ### The factory controller
 

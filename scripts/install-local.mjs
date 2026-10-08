@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readlinkSync,
   symlinkSync,
   unlinkSync,
@@ -21,11 +22,15 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const installHome = args[1] ? resolve(args[1]) : homedir()
 const executable = join(root, 'dist', 'oar.mjs')
 const bin = join(installHome, '.local', 'bin', 'oar')
-const source = join(root, 'skill')
-const destinations = [
-  join(installHome, '.claude', 'skills', 'oar'),
-  join(installHome, '.agents', 'skills', 'oar'),
-]
+// Every directory under skills/ is one skill, installed for Claude Code and for Codex.
+const skillsRoot = join(root, 'skills')
+const skills = readdirSync(skillsRoot, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+const installs = skills.flatMap((name) => [
+  { source: join(skillsRoot, name), destination: join(installHome, '.claude', 'skills', name) },
+  { source: join(skillsRoot, name), destination: join(installHome, '.agents', 'skills', name) },
+])
 
 function entry(path) {
   try {
@@ -43,14 +48,14 @@ try {
     throw new Error(
       `Refusing to replace ${bin}: it is not a symlink. Move it aside explicitly first.`,
     )
-  for (const destination of destinations) {
+  for (const { destination } of installs) {
     const existing = entry(destination)
     if (existing && (!existing.isDirectory() || existing.isSymbolicLink()))
       throw new Error(
         `Refusing to replace skill directory ${destination}: it is not a regular directory.`,
       )
   }
-  for (const destination of destinations) {
+  for (const { source, destination } of installs) {
     mkdirSync(dirname(destination), { recursive: true })
     cpSync(source, destination, { recursive: true, force: true, dereference: false })
   }
@@ -65,7 +70,7 @@ try {
     symlinkSync(executable, bin)
   }
   console.log(`Linked ${bin} → ${executable}`)
-  for (const destination of destinations) console.log(`Installed skill: ${destination}`)
+  for (const { destination } of installs) console.log(`Installed skill: ${destination}`)
 } catch (e) {
   console.error(`Install failed: ${e.message}`)
   process.exitCode = 1

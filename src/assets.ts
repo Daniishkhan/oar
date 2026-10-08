@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { OarError } from './errors.js'
 
 /**
- * Files shipped next to the code (setup/, vm/, templates/, skill/). Both `src/` and `dist/` sit one
+ * Files shipped next to the code (setup/, vm/, templates/, skills/). Both `src/` and `dist/` sit one
  * level below the repo root, and Node resolves the real path of the bundled entry, so `..` works for
  * `tsx src/cli.ts` and for the ~/.local/bin/oar symlink alike.
  */

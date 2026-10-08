@@ -7,20 +7,23 @@ nodes-engine → team ENG).
 ## The flow
 
 1. **Plan in plan mode.** Read the repo first: its AGENTS.md or CLAUDE.md ("Where to work",
-   constraints), and the code the change touches. Discuss with the user and shape the plan as
-   tickets from the start.
+   constraints), and the code the change touches. Send deep exploration to the Explore
+   subagent so its output stays out of this context. Discuss with the user and shape the plan
+   as tickets from the start: one section per ticket with the headings below, plus a line
+   naming the repository or team (nodes-cno → CNO, nodes-engine → ENG).
 2. **Present the plan** with one section per ticket: title, goal, jobs to be done,
    functional and non-functional criteria, scope, context, decisions, staging check, depends on.
-3. **Once the user has authorized publication, save the plan as two files** under
-   `~/.local/state/oar/plans/<slug>/`: `plan.md` holds the design, decisions and verification
-   approach; `tickets.json` holds the tasks and references `"document": "plan.md"`. Put them in
-   the repository instead only when its documentation policy allows plan files (nodes-cno's
-   AGENTS.md does not). Existing authorization is sufficient; do not ask again.
-   `oar ticket example` prints valid JSON.
-4. **`oar ticket check <file>`.** Fix every problem it names. Show the user the ticket titles and
-   their order.
-5. **`oar ticket create <file>`.** Report the identifiers and links. Tickets land in Backlog;
-   the user moves them to Todo. Do not move them yourself unless asked.
+   The user may edit it in their editor (Ctrl+G) before approving.
+3. **Approval saves the artifact.** With the oar hook installed, approving the plan copies it to
+   `~/.local/state/oar/plans/<date>-<slug>/plan.md` and the session is told the path. Without
+   the hook, save it there yourself. Never put plan files in a repository unless its
+   documentation policy allows them (nodes-cno's AGENTS.md does not).
+4. **Publishing is a separate step: `/oar-tickets <plan.md>`.** It runs in its own context,
+   writes `tickets.json` beside the plan, runs `oar ticket check` and `oar ticket create`, and
+   reports the identifiers. The user runs it when ready, in this session or from a fresh
+   terminal with `claude -p "/oar-tickets <path>"`. Do not run `oar ticket create` in the
+   planning context unless the user asks for exactly that.
+5. Tickets land in Backlog; the user moves them to Todo. Never move them yourself.
 
 `check` is read-only and previews the source hash and full Markdown snapshot. `create` persists a
 publication ID, immutable content hash, and UUIDs for every issue and dependency link **before**
