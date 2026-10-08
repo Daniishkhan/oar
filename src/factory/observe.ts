@@ -88,7 +88,8 @@ export async function observeIssue(ctx: Ctx, row: IssueRow, deps: ObserveDeps): 
   if (deps.githubDue && facts.pr && row.phase === 'review') {
     facts.review = await reviewFeed(gh, facts.pr.number, row.reviewCursor).catch(() => facts.review)
     const ci = await checkRuns(gh, facts.pr.headSha).catch(() => null)
-    if (ci) facts.ci = { headSha: ci.headSha, failed: ci.failed, pending: ci.pending }
+    if (ci)
+      facts.ci = { headSha: ci.headSha, failed: ci.failed, pending: ci.pending, passed: ci.passed }
   }
   if (deps.githubDue && row.phase === 'merged' && cfg.deployWorkflow && row.roundStartSha) {
     const run = await workflowRun(gh, cfg.deployWorkflow, row.roundStartSha, cfg.baseBranch).catch(

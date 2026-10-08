@@ -68,6 +68,10 @@ const flatten = (json: unknown): unknown[] => {
 }
 
 const isBot = (login: string, type: string) => type === 'Bot' || login.endsWith('[bot]')
+
+/** Marks the controller's own PR comments (it posts under the same GitHub login as the human). */
+export const OAR_MARKER = '<!-- oar -->'
+const ours = (body: string | null | undefined) => Boolean(body?.includes(OAR_MARKER))
 const after = (iso: string, since: string | null) => !since || iso > since
 
 export interface ReviewFeed {
@@ -80,7 +84,7 @@ export interface ReviewFeed {
 /**
  * Everything a human said on the PR since `since`: review summaries, inline comments and
  * conversation comments. The agent never writes on the PR (it reports on the issue), so every
- * non-bot comment counts as feedback.
+ * non-bot comment counts as feedback, except the controller's own (marked with OAR_MARKER).
  */
 export async function reviewFeed(
   gh: GhFeed,
@@ -95,7 +99,7 @@ export async function reviewFeed(
     const p = Review.safeParse(raw)
     if (!p.success || !p.data.submitted_at) continue
     const login = p.data.user?.login ?? ''
-    if (isBot(login, p.data.user?.type ?? 'User')) continue
+    if (isBot(login, p.data.user?.type ?? 'User') || ours(p.data.body)) continue
     if (p.data.state === 'CHANGES_REQUESTED' && after(p.data.submitted_at, since))
       changesRequested = true
     if (p.data.body && after(p.data.submitted_at, since)) {
@@ -114,7 +118,7 @@ export async function reviewFeed(
     const p = IssueComment.safeParse(raw)
     if (!p.success || !after(p.data.created_at, since)) continue
     const login = p.data.user?.login ?? ''
-    if (isBot(login, p.data.user?.type ?? 'User') || !p.data.body) continue
+    if (isBot(login, p.data.user?.type ?? 'User') || !p.data.body || ours(p.data.body)) continue
     out.push({
       id: `inline-${p.data.id}`,
       author: login,
@@ -130,7 +134,7 @@ export async function reviewFeed(
     const p = IssueComment.safeParse(raw)
     if (!p.success || !after(p.data.created_at, since)) continue
     const login = p.data.user?.login ?? ''
-    if (isBot(login, p.data.user?.type ?? 'User') || !p.data.body) continue
+    if (isBot(login, p.data.user?.type ?? 'User') || !p.data.body || ours(p.data.body)) continue
     out.push({
       id: `conv-${p.data.id}`,
       author: login,

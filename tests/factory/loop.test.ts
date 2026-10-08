@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { taskIdentity } from '../../src/factory/apply.js'
 import { vmDoneMarker } from '../../src/brief.js'
-import { questionPath } from '../../src/factory/brief.js'
+import { questionPath, reviewPath } from '../../src/factory/brief.js'
 import { FactoryDb } from '../../src/factory/db.js'
 import type {
   LinearClient,
@@ -111,6 +111,8 @@ const issue = (over: Partial<LinearIssue> = {}): LinearIssue => ({
 function worker(w: ReturnType<typeof world>) {
   const agent = { status: 'idle', name: '' }
   const pr = { json: '[]' }
+  const checks = { json: '{"check_runs":[]}' }
+  const merge = { code: 0, stderr: '' }
   const prompts: string[] = []
   const info = () =>
     `{"id":"1","result":{"agent":{"agent_status":"${agent.status}","pane_id":"w1:p1","name":"${agent.name}","workspace_id":"w1"}}}`
@@ -143,8 +145,16 @@ function worker(w: ReturnType<typeof world>) {
     .on(/^herdr --machine engine agent send-keys /, { stdout: '{"id":"1","result":{}}' })
     .on(/^herdr --machine engine pane close /, { stdout: '{"id":"1","result":{}}' })
     .on('gh pr list', () => ({ code: 0, stderr: '', stdout: pr.json }))
+    .on('gh pr comment', { code: 0, stdout: 'https://github.com/o/r/pull/7#issuecomment-1' })
+    .on('gh pr ready', { code: 0 })
+    .on('gh pr merge', () => ({ code: merge.code, stdout: '', stderr: merge.stderr }))
+    .on(/^gh api repos\/\S+\/commits\/\S+\/check-runs/, () => ({
+      code: 0,
+      stderr: '',
+      stdout: checks.json,
+    }))
     .on('gh api', { code: 0, stdout: '[]' })
-  return { agent, pr, prompts }
+  return { agent, pr, checks, merge, prompts }
 }
 
 function setup() {
@@ -153,6 +163,8 @@ function setup() {
     repos: { engine: { ...DEFAULT_CONFIG.repos.engine!, worktreeInit: [] } },
     factory: {
       ...DEFAULT_CONFIG.factory,
+      // ≤ 10 minutes keeps runCommand synchronous (the detached path polls every 3 s)
+      review: { ...DEFAULT_CONFIG.factory.review, timeoutMinutes: 5 },
       role: 'controller',
       linear: { ...DEFAULT_CONFIG.factory.linear, teams: { ENG: 'engine' }, mention: '@danish' },
     },
@@ -316,5 +328,147 @@ describe('Factory end to end (fakes)', () => {
     linear.issues.push(issue())
     await tick(f)
     expect(db.issueByIdentifier('ENG-1')!.phase).toBe('queued')
+  })
+})
+
+describe('Factory automated review and merge (fakes)', () => {
+  const prJson = (state: 'OPEN' | 'MERGED', head = 'abc') =>
+    JSON.stringify([
+      {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        isDraft: state === 'OPEN',
+        state,
+        headRefOid: head,
+        mergeCommit: state === 'MERGED' ? { oid: 'm1' } : null,
+        updatedAt: T0,
+        reviewDecision: '',
+        mergeable: 'MERGEABLE',
+      },
+    ])
+  const GREEN = JSON.stringify({
+    check_runs: [{ name: 'checks', status: 'completed', conclusion: 'success' }],
+  })
+  const P1 = {
+    severity: 'P1',
+    file: 'README.md',
+    line: 3,
+    title: 'Wrong command',
+    detail: 'the sentence names a command that does not exist',
+    fix: 'say oar factory status',
+  }
+
+  /** Ready → building → a draft PR in review with green checks and a reviewer answer waiting. */
+  async function inReview(findings: unknown[]) {
+    const s = setup()
+    s.linear.issues.push(issue())
+    await tick(s.f) // 1: dispatch
+    const row = s.db.issueByIdentifier('ENG-1')!
+    const task = loadState(s.w.ctx.paths).tasks[row.taskId!]!
+    s.agent.status = 'idle'
+    s.w.boat.files.set(`bx_1:${vmDoneMarker(task.id)}`, 'x')
+    s.pr.json = prJson('OPEN')
+    await tick(s.f) // 2: review
+    expect(s.db.issue(row.id)!.phase).toBe('review')
+    s.checks.json = GREEN
+    s.w.boat.files.set(
+      `bx_1:/home/user/oar/tasks/${task.id}/review-out.json`,
+      JSON.stringify({ summary: 'Small README change.', findings }),
+    )
+    return { ...s, row, task }
+  }
+
+  it('reviews a green PR, merges it, and closes the issue', async () => {
+    const { w, f, db, linear, row, pr } = await inReview([])
+    await tick(f) // 3: green → automated review
+    const reviewed = db.issue(row.id)!
+    expect(reviewed).toMatchObject({ reviewedSha: 'abc', reviewVerdict: 'pass', phase: 'review' })
+    const run = w.boat.commands.find((c) => c.req.command.includes('codex exec'))
+    expect(run?.req.command).toContain('-s read-only')
+    expect(
+      w.boat.commands.some((c) => c.req.command.includes('git worktree add -f --detach')),
+    ).toBe(true)
+    expect(w.exec.lines().some((l) => l.startsWith('gh pr comment 7 --repo'))).toBe(true)
+    expect(w.exec.calls.find((c) => c.args[1] === 'comment')!.opts).toMatchObject({
+      input: expect.stringContaining('<!-- oar -->'),
+    })
+    expect(linear.lastComment()).toContain('no findings')
+    expect(linear.lastComment()).toContain('merges next')
+
+    await tick(f) // 4: no GitHub reads this tick
+    await tick(f) // 5: merge
+    expect(w.exec.lines().some((l) => l.startsWith('gh pr ready 7'))).toBe(true)
+    const mergeLine = w.exec.lines().find((l) => l.startsWith('gh pr merge 7'))
+    expect(mergeLine).toContain('--squash --delete-branch --match-head-commit abc')
+    expect(db.issue(row.id)!.mergeSha).toBe('abc')
+    await tick(f) // 6: nothing new; no second merge
+    expect(w.exec.lines().filter((l) => l.startsWith('gh pr merge')).length).toBe(1)
+
+    pr.json = prJson('MERGED')
+    await tick(f)
+    expect(db.issue(row.id)!.phase).toBe('closed')
+    expect(linear.moves.at(-1)?.state).toBe('Done')
+    expect(db.events({ issueId: row.id, limit: 100 }).map((e) => e.kind)).toEqual(
+      expect.arrayContaining(['review-start', 'review', 'merge-start', 'merged-by-oar', 'merged']),
+    )
+  })
+
+  it('sends blocking findings back to the agent and asks a human when the round pushes nothing', async () => {
+    const { w, f, db, linear, row, task, agent, prompts } = await inReview([P1])
+    await tick(f) // 3: review → block
+    expect(db.issue(row.id)).toMatchObject({ reviewVerdict: 'block', reviewedSha: 'abc' })
+    expect(linear.lastComment()).toContain('[P1] Wrong command')
+    await tick(f) // 4: no GitHub reads
+    await tick(f) // 5: review round 2
+    const after = db.issue(row.id)!
+    expect(after).toMatchObject({
+      phase: 'building',
+      round: 2,
+      reviewRounds: 1,
+      reviewRoundSha: 'abc',
+    })
+    expect(w.boat.files.get(`bx_1:${reviewPath(task.id, 2)}`)).toContain('[P1, **blocking**]')
+    expect(prompts.at(-1)).toContain('[oar r2]')
+    expect(w.exec.lines().some((l) => l.startsWith('gh pr merge'))).toBe(false)
+
+    // the agent stops without pushing (the stale done marker stays in the fake VM)
+    agent.status = 'idle'
+    await tick(f) // 6: noop round → review
+    await tick(f) // 7: blocking findings stand → Needs Input
+    expect(db.issue(row.id)!.phase).toBe('needs_input')
+    expect(db.ownComment(row.id, 'review-noop-abc')?.status).toBe('sent')
+    expect(linear.moves.at(-1)?.state).toBe('Needs Input')
+    const n = linear.moves.length
+    await tick(f)
+    await tick(f)
+    expect(linear.moves.length).toBe(n)
+  })
+
+  it('parks the issue when GitHub refuses the merge, without retrying elsewhere', async () => {
+    const { w, f, db, linear, row, merge } = await inReview([])
+    merge.code = 1
+    merge.stderr = 'Pull request #7 is not mergeable: the base branch policy prohibits the merge'
+    await tick(f) // 3: review
+    await tick(f) // 4
+    await tick(f) // 5: merge refused
+    const r = db.issue(row.id)!
+    expect(r.phase).toBe('needs_input')
+    expect(r.mergeSha).toBe('abc')
+    expect(linear.lastComment()).toContain('Could not merge')
+    expect(linear.lastComment()).toContain('policy prohibits')
+    expect(w.boat.commands.some((c) => c.req.command.startsWith('gh '))).toBe(false)
+  })
+
+  it('records a failed reviewer once and asks a human', async () => {
+    const { w, f, db, linear, row, task } = await inReview([])
+    w.boat.files.delete(`bx_1:/home/user/oar/tasks/${task.id}/review-out.json`)
+    w.boat.commandRules.push({ re: /codex exec/, result: { exitCode: 1 } })
+    w.boat.files.set(`bx_1:/home/user/oar/tasks/${task.id}/review-log.txt`, 'error: not logged in')
+    await tick(f)
+    const r = db.issue(row.id)!
+    expect(r).toMatchObject({ phase: 'needs_input', reviewVerdict: 'error', reviewedSha: 'abc' })
+    expect(linear.lastComment()).toContain('automated review')
+    expect(linear.lastComment()).toContain('not logged in')
+    expect(w.exec.lines().some((l) => l.startsWith('gh pr merge'))).toBe(false)
   })
 })

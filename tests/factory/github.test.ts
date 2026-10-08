@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_CONFIG, type RepoConfig } from '../../src/config.js'
-import { checkRuns, GhFeed, reviewFeed, workflowRun } from '../../src/factory/github.js'
+import { checkRuns, GhFeed, OAR_MARKER, reviewFeed, workflowRun } from '../../src/factory/github.js'
 import { FakeExec } from '../fakes/exec.js'
 
 const repo: RepoConfig = { ...DEFAULT_CONFIG.repos.engine!, github: 'o/r' }
@@ -282,5 +282,30 @@ describe('workflowRun', () => {
     const none = new FakeExec().on(/gh api/, json({ workflow_runs: [] }))
     expect(await workflowRun(feed(none), 'd.yml', 'abc', 'main')).toBeNull()
     expect(await workflowRun(feed(new FakeExec()), 'd.yml', 'abc', 'main')).toBeNull()
+  })
+})
+
+describe('reviewFeed and the controller own comments', () => {
+  it('drops comments carrying the oar marker and never uses them as the cursor', async () => {
+    const mine = `${OAR_MARKER}\n**Automated review** …`
+    const exec = rules({
+      reviews: [
+        {
+          id: 1,
+          state: 'COMMENTED',
+          body: mine,
+          submitted_at: '2026-01-05T00:00:00Z',
+          user: human,
+        },
+      ],
+      inline: [{ id: 2, body: mine, created_at: '2026-01-05T00:00:00Z', user: human, path: 'a' }],
+      conv: [
+        { id: 3, body: mine, created_at: '2026-01-05T00:00:00Z', user: human },
+        { id: 4, body: 'real feedback', created_at: '2026-01-02T00:00:00Z', user: human },
+      ],
+    })
+    const r = await reviewFeed(feed(exec), 7, null)
+    expect(r.comments.map((c) => c.id)).toEqual(['conv-4'])
+    expect(r.cursor).toBe('2026-01-02T00:00:00Z')
   })
 })

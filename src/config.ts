@@ -65,6 +65,9 @@ export const RepoSchema = z.object({
   playwright: z.boolean().default(false),
   /** GitHub Actions workflow file that deploys `baseBranch` after a merge (its result is posted on the issue). */
   deployWorkflow: z.string().optional(),
+  /** Factory: merge the PR once CI is green and the automated review has no blocking findings. */
+  autoMerge: z.boolean().default(true),
+  mergeMethod: z.enum(['squash', 'merge', 'rebase']).default('squash'),
 })
 export type RepoConfig = z.infer<typeof RepoSchema>
 
@@ -75,6 +78,13 @@ const DEFAULT_STATES = {
   inReview: 'In Review',
   done: 'Done',
   canceled: 'Canceled',
+}
+
+const DEFAULT_REVIEW = {
+  runner: 'codex' as const,
+  timeoutMinutes: 15,
+  maxRounds: 3,
+  blocking: ['P0' as const, 'P1' as const],
 }
 
 /** The always-on controller that turns Linear issues into tasks (see README "Factory"). */
@@ -114,6 +124,21 @@ export const FactorySchema = z.object({
   githubPollSeconds: z.number().int().min(15).default(60),
   maxCiRounds: z.number().int().min(0).default(3),
   jobTimeoutMinutes: z.number().positive().default(30),
+  /** The automated PR review that runs on the repo VM once CI is green (see README "Factory"). */
+  review: z
+    .object({
+      runner: z.enum(['codex', 'claude']).default('codex'),
+      /** Overrides the runner's own default model. */
+      model: z.string().optional(),
+      timeoutMinutes: z.number().positive().default(15),
+      /** Automated review rounds per issue before a human is asked. */
+      maxRounds: z.number().int().min(0).default(3),
+      /** Severities that block the merge; the rest are advisory. */
+      blocking: z.array(z.enum(['P0', 'P1', 'P2', 'P3'])).default(['P0', 'P1']),
+    })
+    .default(DEFAULT_REVIEW),
+  /** A Linear label that stops auto-merge for an issue (case-insensitive). */
+  holdLabel: z.string().default('hold'),
 })
 export type FactoryConfig = z.infer<typeof FactorySchema>
 
@@ -212,6 +237,28 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
     },
   },
 })
+
+/**
+ * Stored configs are not re-merged with the shipped defaults. For repos whose default deploys
+ * staging from its base branch (cno → dev), fill in the deploy workflow and align the base branch.
+ * Mutates `config`; returns one note per change.
+ */
+export function backfillRepoDefaults(config: Config): string[] {
+  const notes: string[] = []
+  for (const [name, repo] of Object.entries(config.repos)) {
+    const d = DEFAULT_CONFIG.repos[name]
+    if (!d?.deployWorkflow) continue
+    if (!repo.deployWorkflow) {
+      repo.deployWorkflow = d.deployWorkflow
+      notes.push(`${name}.deployWorkflow = ${d.deployWorkflow}`)
+    }
+    if (repo.baseBranch !== d.baseBranch) {
+      notes.push(`${name}.baseBranch ${repo.baseBranch} → ${d.baseBranch}`)
+      repo.baseBranch = d.baseBranch
+    }
+  }
+  return notes
+}
 
 /** Reads ~/.config/oar/config.json, writing the shipped defaults first if it does not exist. */
 export function loadConfig(p: Paths): Config {

@@ -1,6 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CONFIG, inferRepo, loadConfig, loadSecrets, parseEnvFile } from '../src/config.js'
+import {
+  backfillRepoDefaults,
+  ConfigSchema,
+  DEFAULT_CONFIG,
+  inferRepo,
+  loadConfig,
+  loadSecrets,
+  parseEnvFile,
+} from '../src/config.js'
 import { FakeExec } from './fakes/exec.js'
 import { world } from './helpers.js'
 
@@ -42,5 +50,38 @@ describe('inferRepo', () => {
       stdout: 'git@github.com:x/other.git\n',
     })
     await expect(inferRepo(DEFAULT_CONFIG, exec, '/x')).rejects.toThrow(/--repo/)
+  })
+})
+
+describe('backfillRepoDefaults', () => {
+  it('moves a stored cno config onto dev with the staging workflow, leaving engine alone', () => {
+    const stored = ConfigSchema.parse({
+      ...DEFAULT_CONFIG,
+      repos: {
+        engine: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'release' },
+        cno: { ...DEFAULT_CONFIG.repos.cno!, baseBranch: 'main', deployWorkflow: undefined },
+        other: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'trunk' },
+      },
+    })
+    expect(backfillRepoDefaults(stored)).toEqual([
+      'cno.deployWorkflow = staging.yml',
+      'cno.baseBranch main → dev',
+    ])
+    expect(stored.repos.cno).toMatchObject({ baseBranch: 'dev', deployWorkflow: 'staging.yml' })
+    expect(stored.repos.engine?.baseBranch).toBe('release')
+    expect(stored.repos.other?.baseBranch).toBe('trunk')
+    expect(backfillRepoDefaults(stored)).toEqual([])
+    expect(backfillRepoDefaults(ConfigSchema.parse(DEFAULT_CONFIG))).toEqual([])
+  })
+  it('defaults the review and merge settings', () => {
+    const c = ConfigSchema.parse(DEFAULT_CONFIG)
+    expect(c.factory.review).toEqual({
+      runner: 'codex',
+      timeoutMinutes: 15,
+      maxRounds: 3,
+      blocking: ['P0', 'P1'],
+    })
+    expect(c.factory.holdLabel).toBe('hold')
+    expect(c.repos.cno).toMatchObject({ autoMerge: true, mergeMethod: 'squash' })
   })
 })

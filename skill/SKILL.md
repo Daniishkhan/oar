@@ -38,8 +38,10 @@ appends them. Use the template sections Goal / Scope / Plan / Gate / When blocke
 ## The factory (Linear)
 
 When the user wants work queued rather than dispatched by hand, put it in Linear: an issue in
-the repo's team (ENG = engine, CNO = cno) moved to **Ready** is picked up by the always-on
-controller (`oar factory status` shows it). Questions from the agent arrive as comments on the
+the repo's team (ENG = engine, CNO = cno) moved to the trigger state (`factory.linear.states.ready`)
+is picked up by the always-on controller (`oar factory status` shows it). Once CI is green an
+automated reviewer checks the PR; P0/P1 findings go back to the agent, a clean review merges it.
+A `hold` label on the issue stops the merge. Questions from the agent arrive as comments on the
 issue; replies there go back to the agent. `oar factory attach ENG-12` opens the agent's pane.
 Do not also `oar task dispatch` the same work: the two would share one VM screen.
 

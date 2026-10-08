@@ -289,9 +289,11 @@ export class Factory {
         ) ===
       1
     const state = loadState(this.ctx.paths)
+    const factory = this.ctx.config.factory
     const limits = {
-      maxCiRounds: this.ctx.config.factory.maxCiRounds,
-      jobTimeoutMs: this.ctx.config.factory.jobTimeoutMinutes * 60_000,
+      maxCiRounds: factory.maxCiRounds,
+      jobTimeoutMs: factory.jobTimeoutMinutes * 60_000,
+      maxReviewRounds: factory.review.maxRounds,
     }
     for (const row of this.db.activeIssues()) {
       if (this.paused && row.phase === 'queued') continue
@@ -308,9 +310,14 @@ export class Factory {
         const cfg = this.ctx.config.repos[row.repo]
         const actions = decide(row, facts, {
           limits,
-          mention: this.ctx.config.factory.linear.mention,
+          states: factory.linear.states,
+          mention: factory.linear.mention,
           tracksDeploy: Boolean(cfg?.deployWorkflow),
           identifier: row.identifier,
+          blocking: factory.review.blocking,
+          holdLabel: factory.holdLabel,
+          autoMerge: cfg?.autoMerge ?? false,
+          mergeMethod: cfg?.mergeMethod ?? 'squash',
         })
         if (actions.length) {
           this.log(`${row.identifier} [${row.phase}] → ${actions.map((a) => a.kind).join(', ')}`)

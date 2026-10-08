@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { decide, type DecideContext } from '../../src/factory/reconcile.js'
-import type { Action, Facts, HumanComment, IssueRow, PrSnapshot } from '../../src/factory/types.js'
+import type {
+  Action,
+  Facts,
+  Finding,
+  HumanComment,
+  IssueRow,
+  PrSnapshot,
+} from '../../src/factory/types.js'
 
 const NOW = '2026-10-08T09:00:00.000Z'
 
@@ -29,6 +36,12 @@ const row = (over: Partial<IssueRow> = {}): IssueRow => ({
   ciRounds: 0,
   reviewCursor: null,
   jobStartedAt: null,
+  reviewedSha: null,
+  reviewVerdict: null,
+  reviewFindings: [],
+  reviewRounds: 0,
+  reviewRoundSha: null,
+  mergeSha: null,
   blockedBy: [],
   gone: false,
   updatedAt: NOW,
@@ -66,6 +79,8 @@ const pr = (over: Partial<PrSnapshot> = {}): PrSnapshot => ({
   headSha: 'abc123',
   mergeSha: null,
   updatedAt: NOW,
+  reviewDecision: '',
+  mergeable: 'MERGEABLE',
   ...over,
 })
 
@@ -79,10 +94,22 @@ const comment = (over: Partial<HumanComment> = {}): HumanComment => ({
 })
 
 const ctx: DecideContext = {
-  limits: { maxCiRounds: 3, jobTimeoutMs: 30 * 60_000 },
+  limits: { maxCiRounds: 3, jobTimeoutMs: 30 * 60_000, maxReviewRounds: 3 },
+  states: {
+    ready: 'Ready',
+    inProgress: 'In Progress',
+    needsInput: 'Needs Input',
+    inReview: 'In Review',
+    done: 'Done',
+    canceled: 'Canceled',
+  },
   mention: '@danish',
   tracksDeploy: false,
   identifier: 'ENG-12',
+  blocking: ['P0', 'P1'],
+  holdLabel: 'hold',
+  autoMerge: true,
+  mergeMethod: 'squash',
 }
 
 const kinds = (actions: Action[]) => actions.map((a) => a.kind)
@@ -389,7 +416,7 @@ describe('decide: review', () => {
     expect(rr.ciSha).toBeUndefined()
   })
   it('starts a CI round once per SHA and stops at the limit', () => {
-    const red = { headSha: 'abc123', failed: ['Verify'], pending: false }
+    const red = { headSha: 'abc123', failed: ['Verify'], pending: false, passed: false }
     const a = decide(r(), facts({ agent: 'idle', linearKey: 'inReview', pr: pr(), ci: red }), ctx)
     expect(find(a, 'review_round')).toMatchObject({ ciSha: 'abc123', failed: ['Verify'] })
     expect(
@@ -463,5 +490,189 @@ describe('decide: merged', () => {
     expect(decide(m(), facts({ linearKey: 'done' }), ctx)).toEqual([
       { kind: 'set_phase', phase: 'closed' },
     ])
+  })
+})
+
+describe('decide: automated review and merge', () => {
+  const r = (over: Partial<IssueRow> = {}) =>
+    row({
+      phase: 'review',
+      round: 1,
+      taskId: 't1',
+      prNumber: 7,
+      prUrl: pr().url,
+      roundStartSha: 'abc123',
+      linearState: 'In Review',
+      lastSetState: 'In Review',
+      ...over,
+    })
+  const green = { headSha: 'abc123', failed: [], pending: false, passed: true }
+  const quiet = (over: Partial<Facts> = {}) =>
+    facts({ agent: 'idle', linearKey: 'inReview', pr: pr(), ci: green, ...over })
+  const p1: Finding = {
+    severity: 'P1',
+    file: 'a.py',
+    line: 3,
+    title: 'Off by one',
+    detail: 'loses the last row',
+    fix: 'use <=',
+  }
+  const p3: Finding = {
+    severity: 'P3',
+    file: 'b.py',
+    line: null,
+    title: 'Name',
+    detail: '',
+    fix: null,
+  }
+  const reviewed = (over: Partial<IssueRow> = {}) =>
+    r({ reviewedSha: 'abc123', reviewVerdict: 'pass', ...over })
+
+  it('reviews a green head once', () => {
+    const a = decide(r(), quiet(), ctx)
+    expect(a).toEqual([{ kind: 'auto_review', sha: 'abc123' }])
+  })
+  it('waits for green CI on this head and for running jobs', () => {
+    expect(decide(r(), quiet({ ci: null }), ctx)).toEqual([])
+    expect(decide(r(), quiet({ ci: { ...green, pending: true, passed: false } }), ctx)).toEqual([])
+    expect(decide(r(), quiet({ ci: { ...green, headSha: 'old' } }), ctx)).toEqual([])
+    expect(
+      decide(r(), quiet({ ci: { ...green, passed: false, failed: ['Verify'] } }), ctx),
+    ).toMatchObject([{ kind: 'review_round', ciSha: 'abc123' }])
+    expect(decide(r(), quiet({ jobRunning: true }), ctx)).toEqual([])
+  })
+  it('puts human feedback before the automated review', () => {
+    const a = decide(
+      r(),
+      quiet({
+        review: {
+          comments: [
+            { id: 'conv-1', author: 'dan', body: 'x', createdAt: NOW, kind: 'conversation' },
+          ],
+          changesRequested: false,
+          cursor: NOW,
+        },
+      }),
+      ctx,
+    )
+    expect(kinds(a)).toEqual(['review_round'])
+    expect(find(a, 'review_round')!.reviewSha).toBeUndefined()
+  })
+  it('sends blocking findings back to the agent as a round, blocking first', () => {
+    const a = decide(reviewed({ reviewVerdict: 'block', reviewFindings: [p3, p1] }), quiet(), ctx)
+    const rr = find(a, 'review_round')!
+    expect(rr).toMatchObject({ reviewSha: 'abc123', failed: [], deliver: [] })
+    expect(rr.comments[0]).toMatchObject({
+      severity: 'P1',
+      blocking: true,
+      path: 'a.py',
+      line: 3,
+      kind: 'review',
+      body: '[P1] Off by one — loses the last row — fix: use <=',
+    })
+    expect(rr.comments[1]).toMatchObject({ severity: 'P3', blocking: false })
+    expect(
+      decide(
+        reviewed({ reviewVerdict: 'block', reviewFindings: [p1] }),
+        quiet({ slotFree: false }),
+        ctx,
+      ),
+    ).toEqual([])
+  })
+  it('asks a human when a round changed nothing, the round limit is hit, or the review failed', () => {
+    const noop = decide(
+      reviewed({ reviewVerdict: 'block', reviewFindings: [p1], reviewRoundSha: 'abc123' }),
+      quiet(),
+      ctx,
+    )
+    expect(find(noop, 'comment')?.key).toBe('review-noop-abc123')
+    expect(find(noop, 'set_phase')?.phase).toBe('needs_input')
+    const limit = decide(
+      reviewed({ reviewVerdict: 'block', reviewFindings: [p1], reviewRounds: 3 }),
+      quiet(),
+      ctx,
+    )
+    expect(find(limit, 'comment')?.key).toBe('review-limit-abc123')
+    const err = decide(reviewed({ reviewVerdict: 'error' }), quiet(), ctx)
+    expect(find(err, 'comment')?.key).toBe('review-error-abc123')
+    expect(find(err, 'set_state')?.state).toBe('needsInput')
+  })
+  it('merges a clean review of a green head', () => {
+    expect(decide(reviewed({ reviewFindings: [p3] }), quiet(), ctx)).toEqual([
+      { kind: 'merge', number: 7, sha: 'abc123', method: 'squash', isDraft: true },
+    ])
+  })
+  it('does not merge when held, turned off, or a human requested changes', () => {
+    expect(decide(reviewed({ labels: ['Hold'] }), quiet(), ctx)).toEqual([])
+    expect(decide(reviewed(), quiet(), { ...ctx, autoMerge: false })).toEqual([])
+    expect(
+      decide(reviewed(), quiet({ pr: pr({ reviewDecision: 'CHANGES_REQUESTED' }) }), ctx),
+    ).toEqual([])
+  })
+  it('asks for help when the branch conflicts', () => {
+    const a = decide(reviewed(), quiet({ pr: pr({ mergeable: 'CONFLICTING' }) }), ctx)
+    expect(find(a, 'comment')?.key).toBe('conflict-abc123')
+  })
+  it('attempts a merge at most once per head and flags one that never finished', () => {
+    expect(
+      decide(reviewed({ mergeSha: 'abc123', jobStartedAt: NOW }), quiet({ jobAgeMs: 60_000 }), ctx),
+    ).toEqual([])
+    expect(decide(reviewed({ mergeSha: 'abc123' }), quiet(), ctx)).toEqual([])
+    const stuck = decide(
+      reviewed({ mergeSha: 'abc123', jobStartedAt: NOW }),
+      quiet({ jobAgeMs: 31 * 60_000 }),
+      ctx,
+    )
+    expect(find(stuck, 'comment')?.key).toBe('merge-stuck-abc123')
+    expect(stuck.at(-1)).toMatchObject({
+      kind: 'set_phase',
+      phase: 'needs_input',
+      jobStartedAt: null,
+    })
+    // a new head after the failed attempt is judged again
+    expect(decide(reviewed({ mergeSha: 'old' }), quiet(), ctx).map((a) => a.kind)).toEqual([
+      'merge',
+    ])
+  })
+  it('lets a human answer retry a failed merge or review and resets the round budget', () => {
+    const a = decide(
+      r({
+        phase: 'needs_input',
+        mergeSha: 'abc123',
+        reviewedSha: 'abc123',
+        reviewVerdict: 'error',
+        reviewRounds: 3,
+        linearState: 'Needs Input',
+        lastSetState: 'Needs Input',
+      }),
+      facts({ agent: 'idle', linearKey: 'needsInput', pr: pr(), undelivered: [comment()] }),
+      ctx,
+    )
+    expect(find(a, 'set_phase')).toMatchObject({
+      phase: 'building',
+      mergeSha: null,
+      reviewRounds: 0,
+      reviewedSha: null,
+    })
+  })
+  it('keeps an issue in Needs Input when only an old done marker is there', () => {
+    const a = decide(
+      r({
+        phase: 'needs_input',
+        round: 2,
+        linearState: 'Needs Input',
+        lastSetState: 'Needs Input',
+      }),
+      facts({ agent: 'idle', linearKey: 'needsInput', marker: true, pr: pr() }),
+      ctx,
+    )
+    expect(a).toEqual([])
+  })
+  it('names the configured trigger state in its messages', () => {
+    const a = decide(row(), facts({ vmUp: null }), {
+      ...ctx,
+      states: { ...ctx.states, ready: 'Todo' },
+    })
+    expect(find(a, 'comment')?.body).toContain('move this back to Todo')
   })
 })

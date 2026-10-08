@@ -53,7 +53,7 @@ task
 
 factory (an always-on controller VM turns Linear issues into tasks on the repo VMs)
   setup                         create/resume the controller, copy oar there, join the tailnet, register workers, start the service
-  deploy                        rebuild oar, copy it to the controller, restart the service
+  deploy                        rebuild oar, copy it and the config to the controller, restart the service
   status | log [ISSUE] [-f]     what the controller is doing (forwarded over ssh)
   pause | resume                stop/allow new dispatches
   attach <ENG-12>               focus the issue's agent on its worker and attach Herdr

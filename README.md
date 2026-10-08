@@ -79,8 +79,8 @@ task's `--hours` budget. `oar status` shows "$ today" per VM.
 An always-on `small` boat VM, `oar-factory`, runs `oar factory serve` as a systemd unit. It polls
 Linear and GitHub and drives the worker VMs with the same code the CLI uses:
 
-- A Linear issue moved to **Ready** (team `ENG` → engine, `CNO` → cno; `factory.linear.teams`)
-  becomes an oar task: brief from the issue and its comments, branch `codex/<team>-<n>-<slug>`,
+- A Linear issue moved to the trigger state (`factory.linear.states.ready`, default **Ready**;
+  team `ENG` → engine, `CNO` → cno; `factory.linear.teams`) becomes an oar task: brief from the issue and its comments, branch `codex/<team>-<n>-<slug>`,
   a Claude pane on the repo VM. The controller comments "Started…" and moves the card to
   **In Progress**.
 - The agent asks by writing `question.md` next to its brief and stopping: the question lands on
@@ -89,6 +89,14 @@ Linear and GitHub and drives the worker VMs with the same code the CLI uses:
 - A draft PR with new commits moves the card to **In Review**; review comments, a
   changes-requested review and red CI come back as numbered rounds; a merge moves it to **Done**
   (nodes-cno: the staging workflow result is posted first). Canceling stops the agent.
+- Once the PR's checks are green and nobody has commented, an automated reviewer (Codex by
+  default, `factory.review`) reads the head commit in a detached worktree on the repo VM,
+  read-only, and posts its findings on the PR and the issue. P0/P1 findings (`review.blocking`)
+  go back to the agent as a review round, at most `review.maxRounds` times; a clean review merges
+  the PR (`gh pr merge --squash --match-head-commit`, per repo `autoMerge`/`mergeMethod`). Human
+  feedback always comes first. A `hold` label on the issue (`factory.holdLabel`) stops the merge;
+  a reviewer failure, a conflict, a refused merge or a round that pushes nothing parks the issue
+  in **Needs Input**; a reply there retries. Merging by hand overrides the reviewer.
 - The keeper extends worker TTLs while they hold work and stops a worker idle for
   `factory.idleStopMinutes` (no busy Herdr agent, no terminal session). The controller itself
   never auto-stops.
@@ -104,11 +112,13 @@ oar factory status           # phases per issue, VMs, last tick (forwarded over 
 oar factory log ENG-12 -f    # the controller's event log
 oar factory attach ENG-12    # Herdr on the issue's agent
 oar factory pause|resume     # hold new dispatches (running issues continue)
-oar factory deploy           # after changing oar: rebuild, copy, restart
+oar factory deploy           # after changing oar or its config: rebuild, copy bundle + config, restart
 ```
 
 State on the controller: `~/.local/state/oar/state.json` (tasks, VMs) and `factory.sqlite`
-(issues, rounds, comment delivery, idempotency keys, events).
+(issues, rounds, reviews, merge attempts, comment delivery, idempotency keys, events). Its
+config is the Mac's, copied by `setup` and `deploy`; both bring a stored repo entry up to the
+shipped defaults first (nodes-cno: base `dev`, deploy workflow `staging.yml`).
 
 ## Development
 
@@ -134,7 +144,7 @@ Update this list as the end-to-end checks from the plan are run against the real
       fullscreen-renderer prompt, now pre-set via `tui` in `vm/claude-settings.json` and answered by the runner (2026-10-07)
 - [x] `gh pr create` on the VM works with the injected token: nodes-engine draft PR #149 from the smoke task (2026-10-07)
 - [x] `herdr machine add <alias> --label <l> --remote-session default` works non-interactively once the server runs on the VM (2026-10-07)
-- [ ] Codex is not logged in on the VMs, so nodes-engine's pre-PR Codex review reports "did not run"; `codex login` over `oar vm ssh` if wanted
+- [x] Codex CLI is on both worker images (`/usr/local/bin/codex`); engine has a saved login (2026-10-08). The factory's automated reviewer needs it on every repo VM: `oar vm login <repo> --codex`
 - [x] boat `sshKey` appends (not replaces) authorized keys: the Mac's and the controller's keys both stay on the workers (2026-10-08); every host re-appends its own key on `vm up` anyway
 - [x] `ttlSeconds: null` accepted at creation for the controller sandbox; `archiveAfter` reads null (2026-10-08, bx_w55wbqrq)
 - [x] Linux Herdr client forwards `--machine` to another VM: `herdr machine add oar-engine --label engine --remote-session default` on the controller, then `herdr --machine engine agent list` answers (2026-10-08)

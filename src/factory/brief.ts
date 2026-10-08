@@ -48,6 +48,7 @@ export function factoryFooter(task: Task, issue: IssueRow): FooterOptions {
     extra: [
       '- Report on the Linear issue, not on the PR: the factory copies your final reply there. Never comment on the PR yourself; every PR comment is treated as my feedback.',
       `- A review round arrives as \`${vmTaskDir(task.id)}/review-<n>.md\`. Address every item, push, run the gate, then \`touch ${vmTaskDir(task.id)}/done\` again and reply with a summary of what changed.`,
+      '- Once CI is green an automated reviewer reads every push. Its P0/P1 findings come back to you as a review round; a clean review merges the PR without anyone clicking, so the PR must be complete when you touch `done`.',
     ],
   }
 }
@@ -75,11 +76,18 @@ export function reviewBrief(
       '',
     )
   }
+  const anyBlocking = comments.some((c) => c.blocking)
   if (comments.length) {
     lines.push('## Review comments', '')
+    if (anyBlocking)
+      lines.push(
+        'Items marked **blocking** come from the automated reviewer and must be fixed before the PR can merge. The rest are advisory: fix them when cheap, otherwise say why not in your summary.',
+        '',
+      )
     for (const c of comments) {
       const where = c.path ? ` on \`${c.path}${c.line ? `:${c.line}` : ''}\`` : ''
-      lines.push(`- **${c.author}**${where} (${c.kind}):`)
+      const tag = c.severity ? ` [${c.severity}${c.blocking ? ', **blocking**' : ''}]` : ''
+      lines.push(`- **${c.author}**${tag}${where} (${c.kind}):`)
       lines.push(
         ...c.body
           .trim()

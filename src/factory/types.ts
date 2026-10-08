@@ -1,5 +1,7 @@
 import type { LiveAgent } from '../runner.js'
 
+export type MergeMethod = 'squash' | 'merge' | 'rebase'
+
 /** The controller's own view of an issue; Linear's state is an input, the phase is ours. */
 export const Phases = [
   'queued',
@@ -63,10 +65,32 @@ export interface IssueRow {
   ciRounds: number
   reviewCursor: string | null
   jobStartedAt: string | null
+  /** The head SHA the automated reviewer last judged, and its verdict and findings. */
+  reviewedSha: string | null
+  reviewVerdict: ReviewVerdict | null
+  reviewFindings: Finding[]
+  /** Automated review rounds so far, and the head the last one was started for. */
+  reviewRounds: number
+  reviewRoundSha: string | null
+  /** The head SHA a merge was attempted for (at most once per SHA). */
+  mergeSha: string | null
   blockedBy: string[]
   gone: boolean
   updatedAt: string
   createdAt: string
+}
+
+export type Severity = 'P0' | 'P1' | 'P2' | 'P3'
+export type ReviewVerdict = 'pass' | 'block' | 'error'
+
+/** One item from the automated reviewer. */
+export interface Finding {
+  severity: Severity
+  file: string
+  line?: number | null
+  title: string
+  detail: string
+  fix?: string | null
 }
 
 export interface HumanComment {
@@ -85,6 +109,10 @@ export interface PrSnapshot {
   headSha: string
   mergeSha: string | null
   updatedAt: string
+  /** GitHub's review decision: '' | APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED. */
+  reviewDecision: string
+  /** MERGEABLE | CONFLICTING | UNKNOWN. */
+  mergeable: string
 }
 
 export interface ReviewComment {
@@ -95,6 +123,9 @@ export interface ReviewComment {
   kind: 'review' | 'inline' | 'conversation'
   path?: string
   line?: number
+  /** Set on findings from the automated reviewer. */
+  severity?: Severity
+  blocking?: boolean
 }
 
 export interface Facts {
@@ -108,7 +139,7 @@ export interface Facts {
   paneTail: string
   undelivered: HumanComment[]
   review: { comments: ReviewComment[]; changesRequested: boolean; cursor: string | null }
-  ci: { headSha: string; failed: string[]; pending: boolean } | null
+  ci: { headSha: string; failed: string[]; pending: boolean; passed: boolean } | null
   staging: { conclusion: string | null; url: string | null } | null
   /** Where the issue's Linear state sits in our model right now. */
   linearKey: StateKey | 'other'
@@ -127,6 +158,7 @@ export interface Facts {
 export interface Limits {
   maxCiRounds: number
   jobTimeoutMs: number
+  maxReviewRounds: number
 }
 
 export type Action =
@@ -140,8 +172,11 @@ export type Action =
       ciSha?: string
       cursor?: string | null
       deliver?: HumanComment[]
+      /** Set when the round carries the automated reviewer's findings for this head. */
+      reviewSha?: string
     }
-  | { kind: 'ci_round'; sha: string; failed: string[] }
+  | { kind: 'auto_review'; sha: string }
+  | { kind: 'merge'; number: number; sha: string; method: MergeMethod; isDraft: boolean }
   | { kind: 'reset_round_files' }
   | { kind: 'comment'; key: string; body: string }
   | { kind: 'link_pr'; url: string }
@@ -158,6 +193,9 @@ export type Action =
       ciRounds?: number
       reviewCursor?: string
       jobStartedAt?: string | null
+      reviewedSha?: string | null
+      reviewRounds?: number
+      mergeSha?: string | null
     }
   | { kind: 'nudge'; text: string }
   | { kind: 'stop_agent' }

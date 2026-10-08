@@ -36,6 +36,12 @@ const issue = (over: Partial<IssueRow> = {}): IssueRow => ({
   ciRounds: 0,
   reviewCursor: null,
   jobStartedAt: null,
+  reviewedSha: null,
+  reviewVerdict: null,
+  reviewFindings: [],
+  reviewRounds: 0,
+  reviewRoundSha: null,
+  mergeSha: null,
   blockedBy: [],
   gone: false,
   updatedAt: '',
@@ -208,5 +214,40 @@ describe('cleanTail', () => {
   it('keeps only the last lines', () => {
     const text = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n')
     expect(cleanTail(text, 3)).toBe('line 47\nline 48\nline 49')
+  })
+})
+
+describe('automated review in briefs', () => {
+  it('tags blocking findings and says what blocking means', () => {
+    const c: ReviewComment[] = [
+      {
+        id: 'auto-1',
+        author: 'automated reviewer',
+        body: '[P1] Off by one',
+        createdAt: '',
+        kind: 'review',
+        path: 'a.py',
+        line: 3,
+        severity: 'P1',
+        blocking: true,
+      },
+      {
+        id: 'auto-2',
+        author: 'automated reviewer',
+        body: '[P3] Name',
+        createdAt: '',
+        kind: 'review',
+        severity: 'P3',
+        blocking: false,
+      },
+    ]
+    const text = reviewBrief(issue(), 2, c, [], 'https://github.com/o/r/pull/7')
+    expect(text).toContain('- **automated reviewer** [P1, **blocking**] on `a.py:3` (review):')
+    expect(text).toContain('- **automated reviewer** [P3] (review):')
+    expect(text).toContain('must be fixed before the PR can merge')
+    expect(reviewBrief(issue(), 2, [], ['Verify'], null)).not.toContain('blocking')
+  })
+  it('tells the builder that a clean review merges on its own', () => {
+    expect(factoryFooter(task, issue()).extra?.join('\n')).toContain('automated reviewer')
   })
 })

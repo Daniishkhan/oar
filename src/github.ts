@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { z } from 'zod'
 import { runCommand, type BoatClient } from './boat.js'
 import type { RepoConfig } from './config.js'
@@ -99,6 +101,8 @@ const SnapshotList = z.array(
     headRefOid: z.string().default(''),
     mergeCommit: z.looseObject({ oid: z.string() }).nullable().optional(),
     updatedAt: z.string().default(''),
+    reviewDecision: z.string().nullable().default(''),
+    mergeable: z.string().nullable().default('UNKNOWN'),
   }),
 )
 
@@ -120,7 +124,7 @@ export async function prSnapshot(
     '--state',
     'all',
     '--json',
-    'number,url,isDraft,state,headRefOid,mergeCommit,updatedAt',
+    'number,url,isDraft,state,headRefOid,mergeCommit,updatedAt,reviewDecision,mergeable',
   ])
   if (json === null) return null
   const parsed = SnapshotList.safeParse(json)
@@ -134,7 +138,51 @@ export async function prSnapshot(
     headSha: pr.headRefOid,
     mergeSha: pr.mergeCommit?.oid ?? null,
     updatedAt: pr.updatedAt,
+    reviewDecision: pr.reviewDecision ?? '',
+    mergeable: pr.mergeable ?? 'UNKNOWN',
   }
+}
+
+export interface GhRunResult {
+  ok: boolean
+  stdout: string
+  stderr: string
+  via: 'local' | 'vm'
+}
+
+/** gh here is missing or not logged in, as opposed to gh refusing the request itself. */
+const GH_UNAVAILABLE =
+  /not logged in|gh auth login|GH_TOKEN|authentication|HTTP 401|Bad credentials/i
+
+/**
+ * A `gh` command that is not a JSON read (pr comment, pr ready, pr merge). Runs here first and on
+ * the VM only when gh here is missing or unauthenticated: a refusal (a conflict, a moved head) is
+ * not retried under another login. `input` goes to stdin; on the VM it is written to a file that
+ * replaces the `-` argument. Runs outside any checkout so `--delete-branch` touches only the remote.
+ */
+export async function ghRun(
+  exec: Exec,
+  boat: BoatClient | null,
+  sandboxId: string | null,
+  args: string[],
+  opts: { input?: string } = {},
+): Promise<GhRunResult> {
+  const local = await exec.run('gh', args, { input: opts.input, cwd: tmpdir(), timeoutMs: 90_000 })
+  if (local.code === 0)
+    return { ok: true, stdout: local.stdout, stderr: local.stderr, via: 'local' }
+  const unavailable = local.code === 127 || GH_UNAVAILABLE.test(local.stderr)
+  if (!unavailable || !boat || !sandboxId)
+    return { ok: false, stdout: local.stdout, stderr: local.stderr, via: 'local' }
+  let vmArgs = args
+  if (opts.input !== undefined) {
+    const path = `/home/user/oar/gh-input-${createHash('sha1').update(opts.input).digest('hex').slice(0, 12)}.txt`
+    await boat.writeFile(sandboxId, path, opts.input)
+    vmArgs = args.map((a) => (a === '-' ? path : a))
+  }
+  const r = await runCommand(boat, sandboxId, `gh ${vmArgs.map(shq).join(' ')}`, {
+    timeoutSeconds: 120,
+  }).catch((e: Error) => ({ exitCode: null, stdout: '', stderr: e.message, timedOut: false }))
+  return { ok: r.exitCode === 0, stdout: r.stdout, stderr: r.stderr, via: 'vm' }
 }
 
 export async function macGhOk(exec: Exec): Promise<boolean> {

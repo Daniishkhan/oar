@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { assetsRoot } from '../assets.js'
 import { runCommand, sandboxState, waitUp } from '../boat.js'
-import { loadSecrets, repoConfig, sshAlias, type Config } from '../config.js'
+import { backfillRepoDefaults, loadSecrets, repoConfig, sshAlias, type Config } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError, usage } from '../errors.js'
 import { shq } from '../exec.js'
@@ -102,6 +102,26 @@ function controllerConfig(ctx: Ctx, sandboxId: string): Config {
   return cfg
 }
 
+/**
+ * Bring the Mac's stored config up to the shipped repo defaults (cno → dev + staging.yml), then
+ * write the controller's copy. Run by setup and by every deploy, so config edits on the Mac
+ * (trigger state, review settings) reach the controller with the next deploy.
+ */
+async function syncConfig(ctx: Ctx, sandboxId: string, log: Log): Promise<void> {
+  const notes = backfillRepoDefaults(ctx.config)
+  if (notes.length) {
+    writeFileSync(ctx.paths.configFile, `${JSON.stringify(ctx.config, null, 2)}\n`)
+    for (const n of notes) log(`config: ${n}`)
+  }
+  await putFile(
+    ctx,
+    '/home/user/.config/oar/config.json',
+    `${JSON.stringify(controllerConfig(ctx, sandboxId), null, 2)}\n`,
+    '644',
+  )
+  log('config synced to the controller')
+}
+
 export async function factorySetup(ctx: Ctx): Promise<void> {
   const log = ctx.io.out
   if (isController(ctx)) throw usage('run oar factory setup from the Mac, not on the controller')
@@ -130,15 +150,6 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
     log(
       `linear: no credentials in ${ctx.paths.envFile}; add LINEAR_CLIENT_ID/LINEAR_CLIENT_SECRET and re-run`,
     )
-  }
-
-  // nodes-cno factory PRs target dev (staging) by decision; keep the Mac's config in step.
-  for (const [name, repo] of Object.entries(ctx.config.repos)) {
-    if (repo.deployWorkflow && repo.baseBranch !== 'dev' && name === 'cno') {
-      repo.baseBranch = 'dev'
-      writeFileSync(ctx.paths.configFile, `${JSON.stringify(ctx.config, null, 2)}\n`)
-      log(`config: ${name}.baseBranch set to dev (staging deploys from it)`)
-    }
   }
 
   const id = await ensureControllerSandbox(ctx, log)
@@ -173,12 +184,7 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
   log('app bundle copied')
 
   // 2. config, secrets, VM records
-  await putFile(
-    ctx,
-    '/home/user/.config/oar/config.json',
-    `${JSON.stringify(controllerConfig(ctx, id), null, 2)}\n`,
-    '644',
-  )
+  await syncConfig(ctx, id, log)
   const env = [
     '# oar factory controller secrets; written by oar factory setup on the Mac',
     `BOAT_API_KEY=${secrets.BOAT_API_KEY}`,
@@ -257,7 +263,7 @@ export async function factorySetup(ctx: Ctx): Promise<void> {
   await forward(ctx, ['doctor'])
 }
 
-/** Rebuild the bundle, copy it over, restart the unit. */
+/** Rebuild the bundle, copy it over, sync the config, restart the unit. */
 export async function factoryDeploy(ctx: Ctx): Promise<void> {
   const log = ctx.io.out
   const root = assetsRoot()
@@ -279,6 +285,8 @@ export async function factoryDeploy(ctx: Ctx): Promise<void> {
     { timeoutMs: 300_000 },
   )
   if (scp.code !== 0) throw new OarError('ssh', `scp failed: ${scp.stderr.trim()}`)
+  const self = loadState(ctx.paths).vms[FACTORY]
+  if (self) await syncConfig(ctx, self.sandboxId, log)
   await remote(
     ctx,
     'sudo install -m 644 ~/oar/app/setup/oar-factory.service /etc/systemd/system/oar-factory.service && sudo systemctl daemon-reload && sudo systemctl restart oar-factory',

@@ -1,13 +1,32 @@
 import { roundToken } from './brief.js'
-import type { Action, Facts, HumanComment, IssueRow, Limits, ReviewComment } from './types.js'
+import { findingsToComments } from './review.js'
+import type {
+  Action,
+  Facts,
+  HumanComment,
+  IssueRow,
+  Limits,
+  MergeMethod,
+  ReviewComment,
+  Severity,
+  StateKey,
+} from './types.js'
 
 export interface DecideContext {
   limits: Limits
+  /** Linear state names (messages name the trigger state as configured). */
+  states: Record<StateKey, string>
   /** Prepended to comments that need the human (a Linear profile URL becomes a mention). */
   mention?: string
   /** The repo has a deploy workflow whose result is worth waiting for after a merge. */
   tracksDeploy: boolean
   identifier: string
+  /** Severities from the automated reviewer that block the merge. */
+  blocking: readonly Severity[]
+  /** A Linear label that stops auto-merge. */
+  holdLabel: string
+  autoMerge: boolean
+  mergeMethod: MergeMethod
 }
 
 const fence = (text: string, max = 1500) => {
@@ -59,8 +78,12 @@ const merged = (ctx: DecideContext, row: IssueRow, f: Facts): Action[] => [
   { kind: 'event', name: 'merged', detail: f.pr?.url ?? '' },
 ]
 
-/** The agent touched `done`: either new commits reached the PR, or a later round had nothing to change. */
-const roundComplete = (row: IssueRow, f: Facts): Action[] | null => {
+/**
+ * The agent touched `done`: either new commits reached the PR, or a later round had nothing to
+ * change. `allowNoop` is off in Needs Input, where an old marker without new commits must not
+ * pull the issue back to review (it would flip between the two states every tick).
+ */
+const roundComplete = (row: IssueRow, f: Facts, allowNoop = true): Action[] | null => {
   if (!f.marker || !f.pr || f.pr.state !== 'OPEN') return null
   if (f.pr.headSha !== row.roundStartSha) {
     const actions: Action[] = []
@@ -84,7 +107,7 @@ const roundComplete = (row: IssueRow, f: Facts): Action[] | null => {
     )
     return actions
   }
-  if (row.round > 1)
+  if (allowNoop && row.round > 1)
     return [
       {
         kind: 'comment',
@@ -104,6 +127,92 @@ const needsInput = (key: string, body: string): Action[] => [
   { kind: 'set_phase', phase: 'needs_input' },
 ]
 
+/** A human answered: allow another merge attempt, a fresh review-round budget, a re-run of a failed review. */
+const humanRetry = (row: IssueRow) => ({
+  mergeSha: null,
+  reviewRounds: 0,
+  ...(row.reviewVerdict === 'error' ? { reviewedSha: null } : {}),
+})
+
+/**
+ * Review phase, nothing from humans and CI not red: green CI → automated review of the head;
+ * blocking findings → a review round for the agent; a clean review → merge.
+ */
+function reviewGate(ctx: DecideContext, row: IssueRow, f: Facts): Action[] {
+  const pr = f.pr!
+  const head = pr.headSha
+  if (f.jobRunning) return []
+  if (row.mergeSha === head) {
+    // A merge was attempted for this head: the job reports a refusal itself, success shows as MERGED.
+    if (row.jobStartedAt && f.jobAgeMs > ctx.limits.jobTimeoutMs)
+      return [
+        ...needsInput(
+          `merge-stuck-${head}`,
+          withMention(
+            ctx,
+            `The merge of ${pr.url} started but never finished (the controller restarted?). Check the PR; reply here to retry, or merge it by hand.`,
+          ),
+        ),
+        { kind: 'set_phase', phase: 'needs_input', jobStartedAt: null },
+      ]
+    return []
+  }
+  if (!f.ci || f.ci.headSha !== head || f.ci.pending || !f.ci.passed) return []
+  if (row.reviewedSha !== head) return [{ kind: 'auto_review', sha: head }]
+  if (row.reviewVerdict === 'error')
+    return needsInput(
+      `review-error-${head}`,
+      withMention(
+        ctx,
+        `The automated review of ${pr.url} failed. Reply here to run it again, or merge by hand.`,
+      ),
+    )
+  if (row.reviewVerdict === 'block') {
+    if (row.reviewRoundSha === head)
+      return needsInput(
+        `review-noop-${head}`,
+        withMention(
+          ctx,
+          `The agent ended the review round without pushing, so the blocking findings stand. Reply here with guidance, push a fix yourself, or merge by hand to override.`,
+        ),
+      )
+    if (row.reviewRounds >= ctx.limits.maxReviewRounds)
+      return needsInput(
+        `review-limit-${head}`,
+        withMention(
+          ctx,
+          `The automated review still blocks after ${row.reviewRounds} round(s), so automatic rounds stopped. Reply here with guidance, or merge by hand to override.`,
+        ),
+      )
+    if (!f.slotFree) return []
+    return [
+      {
+        kind: 'review_round',
+        comments: findingsToComments(head, row.reviewFindings, ctx.blocking, f.nowIso),
+        failed: [],
+        cursor: f.review.cursor,
+        deliver: [],
+        reviewSha: head,
+      },
+    ]
+  }
+  // Clean review of the head with green CI.
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') return []
+  if (pr.mergeable === 'CONFLICTING')
+    return needsInput(
+      `conflict-${head}`,
+      withMention(
+        ctx,
+        `${pr.url} conflicts with its base branch, so it cannot merge. Reply here (for example "merge the base branch and push"), or resolve it by hand.`,
+      ),
+    )
+  const held = row.labels.some((l) => l.toLowerCase() === ctx.holdLabel.toLowerCase())
+  if (held || !ctx.autoMerge) return []
+  return [
+    { kind: 'merge', number: pr.number, sha: head, method: ctx.mergeMethod, isDraft: pr.isDraft },
+  ]
+}
+
 /** Pure: what to do about one issue given what we observed. Order matters: apply runs them in sequence. */
 export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
   const canceled = row.gone || f.linearKey === 'canceled'
@@ -121,14 +230,14 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             'no-vm',
             withMention(
               ctx,
-              `No VM is recorded for repo \`${row.repo}\`; run \`oar vm new ${row.repo}\` and move this back to Ready.`,
+              `No VM is recorded for repo \`${row.repo}\`; run \`oar vm new ${row.repo}\` and move this back to ${ctx.states.ready}.`,
             ),
           ),
           { kind: 'set_phase', phase: 'failed' },
         ]
       if (f.blocked || f.jobRunning || !f.slotFree) return []
       if (row.taskId && row.prNumber)
-        // Moved back to Ready after a PR exists: continue the conversation, do not re-brief.
+        // Moved back to the trigger state after a PR exists: continue the conversation, do not re-brief.
         return [
           {
             kind: 'set_phase',
@@ -136,11 +245,16 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             jobStartedAt: f.nowIso,
             round: row.round + 1,
             roundStartSha: f.pr?.headSha ?? row.roundStartSha,
+            ...humanRetry(row),
           },
-          { kind: 'event', name: 'resume', detail: `round ${row.round + 1} (moved to Ready)` },
+          {
+            kind: 'event',
+            name: 'resume',
+            detail: `round ${row.round + 1} (moved to ${ctx.states.ready})`,
+          },
           {
             kind: 'resume',
-            message: `${roundToken(row.round + 1)} The issue was moved back to Ready. The PR ${row.prUrl ?? ''} already exists: re-read the brief, finish whatever is left, push to the same branch, \`touch\` the done marker, and reply with a summary.`,
+            message: `${roundToken(row.round + 1)} The issue was moved back to ${ctx.states.ready}. The PR ${row.prUrl ?? ''} already exists: re-read the brief, finish whatever is left, push to the same branch, \`touch\` the done marker, and reply with a summary.`,
             deliver: f.undelivered,
           },
         ]
@@ -160,7 +274,7 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             `job-timeout-${row.round}`,
             withMention(
               ctx,
-              `Starting the agent took longer than ${Math.round(ctx.limits.jobTimeoutMs / 60_000)} minutes and was abandoned. Move the issue back to Ready to retry, or attach with ${attachHint(ctx.identifier)}.`,
+              `Starting the agent took longer than ${Math.round(ctx.limits.jobTimeoutMs / 60_000)} minutes and was abandoned. Move the issue back to ${ctx.states.ready} to retry, or attach with ${attachHint(ctx.identifier)}.`,
             ),
           ),
           { kind: 'set_phase', phase: 'failed', jobStartedAt: null },
@@ -248,8 +362,8 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             { kind: 'set_state', state: 'inProgress' },
             { kind: 'set_phase', phase: 'building' },
           ]
-        // The agent finished on its own (its background jobs ended, or a human attached).
-        if (f.agent === 'idle' || f.agent === 'done') return roundComplete(row, f) ?? []
+        // The agent pushed on its own (its background jobs ended, or a human attached).
+        if (f.agent === 'idle' || f.agent === 'done') return roundComplete(row, f, false) ?? []
         return []
       }
       if (f.agent === 'vm-down' || f.agent === 'exited')
@@ -260,6 +374,7 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
             jobStartedAt: f.nowIso,
             round: row.round + 1,
             roundStartSha: f.pr?.headSha ?? null,
+            ...humanRetry(row),
           },
           { kind: 'resume', message: answerPrompt(row.round + 1, answers), deliver: answers },
         ]
@@ -282,6 +397,7 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           round: row.round + 1,
           roundStartSha: f.pr?.headSha ?? null,
           roundStartedAt: f.nowIso,
+          ...humanRetry(row),
         },
         { kind: 'event', name: 'round', detail: `round ${row.round + 1} (answer)` },
         ...answers.map((c, i) =>
@@ -329,7 +445,8 @@ export function decide(row: IssueRow, f: Facts, ctx: DecideContext): Action[] {
           ),
           { kind: 'set_phase', phase: 'needs_input', handledCiSha: f.ci!.headSha },
         ]
-      if (!comments.length && !ciFailed) return []
+      // Humans and red CI come first; the automated review and the merge only run on a quiet PR.
+      if (!comments.length && !ciFailed) return reviewGate(ctx, row, f)
       if (!f.slotFree || f.jobRunning) return []
       return [
         {

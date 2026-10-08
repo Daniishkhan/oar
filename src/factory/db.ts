@@ -2,7 +2,14 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { TokenRecord, TokenStore } from './linear.js'
-import { ACTIVE_PHASES, type HumanComment, type IssueRow, type Phase } from './types.js'
+import {
+  ACTIVE_PHASES,
+  type Finding,
+  type HumanComment,
+  type IssueRow,
+  type Phase,
+  type ReviewVerdict,
+} from './types.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS issues (
@@ -30,6 +37,12 @@ CREATE TABLE IF NOT EXISTS issues (
   ci_rounds INTEGER NOT NULL DEFAULT 0,
   review_cursor TEXT,
   job_started_at TEXT,
+  reviewed_sha TEXT,
+  review_verdict TEXT,
+  review_json TEXT NOT NULL DEFAULT '[]',
+  review_rounds INTEGER NOT NULL DEFAULT 0,
+  review_round_sha TEXT,
+  merge_sha TEXT,
   blocked_by TEXT NOT NULL DEFAULT '[]',
   gone INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT '',
@@ -66,6 +79,16 @@ CREATE INDEX IF NOT EXISTS events_issue ON events(issue_id, id);
 CREATE TABLE IF NOT EXISTS cursors (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `
 
+/** Columns added after the first live deploy; `migrate()` adds them to an existing database. */
+const ADDED_ISSUE_COLUMNS: Array<[string, string]> = [
+  ['reviewed_sha', 'TEXT'],
+  ['review_verdict', 'TEXT'],
+  ['review_json', "TEXT NOT NULL DEFAULT '[]'"],
+  ['review_rounds', 'INTEGER NOT NULL DEFAULT 0'],
+  ['review_round_sha', 'TEXT'],
+  ['merge_sha', 'TEXT'],
+]
+
 type Row = Record<string, string | number | null>
 
 const str = (v: unknown) =>
@@ -80,6 +103,18 @@ const list = (v: unknown): string[] => {
     return []
   }
 }
+
+const findings = (v: unknown): Finding[] => {
+  try {
+    const parsed = JSON.parse(str(v) || '[]') as unknown
+    return Array.isArray(parsed) ? (parsed as Finding[]) : []
+  } catch {
+    return []
+  }
+}
+
+const verdict = (v: unknown): ReviewVerdict | null =>
+  v === 'pass' || v === 'block' || v === 'error' ? v : null
 
 function toIssue(r: Row): IssueRow {
   return {
@@ -107,6 +142,12 @@ function toIssue(r: Row): IssueRow {
     ciRounds: num(r.ci_rounds),
     reviewCursor: nul(r.review_cursor),
     jobStartedAt: nul(r.job_started_at),
+    reviewedSha: nul(r.reviewed_sha),
+    reviewVerdict: verdict(r.review_verdict),
+    reviewFindings: findings(r.review_json),
+    reviewRounds: num(r.review_rounds),
+    reviewRoundSha: nul(r.review_round_sha),
+    mergeSha: nul(r.merge_sha),
     blockedBy: list(r.blocked_by),
     gone: num(r.gone) === 1,
     updatedAt: str(r.updated_at),
@@ -157,6 +198,12 @@ export type IssuePatch = Partial<
     | 'ciRounds'
     | 'reviewCursor'
     | 'jobStartedAt'
+    | 'reviewedSha'
+    | 'reviewVerdict'
+    | 'reviewFindings'
+    | 'reviewRounds'
+    | 'reviewRoundSha'
+    | 'mergeSha'
     | 'gone'
   >
 >
@@ -174,6 +221,12 @@ const COLUMN: Record<keyof IssuePatch, string> = {
   ciRounds: 'ci_rounds',
   reviewCursor: 'review_cursor',
   jobStartedAt: 'job_started_at',
+  reviewedSha: 'reviewed_sha',
+  reviewVerdict: 'review_verdict',
+  reviewFindings: 'review_json',
+  reviewRounds: 'review_rounds',
+  reviewRoundSha: 'review_round_sha',
+  mergeSha: 'merge_sha',
   gone: 'gone',
 }
 
@@ -199,6 +252,16 @@ export class FactoryDb {
     this.db.exec('PRAGMA journal_mode = WAL;')
     this.db.exec('PRAGMA busy_timeout = 5000;')
     this.db.exec(SCHEMA)
+    this.migrate()
+  }
+
+  /** `CREATE TABLE IF NOT EXISTS` leaves an existing table alone; add the columns it lacks. */
+  private migrate(): void {
+    const have = new Set(
+      (this.db.prepare('PRAGMA table_info(issues)').all() as Row[]).map((r) => str(r.name)),
+    )
+    for (const [name, ddl] of ADDED_ISSUE_COLUMNS)
+      if (!have.has(name)) this.db.exec(`ALTER TABLE issues ADD COLUMN ${name} ${ddl}`)
   }
 
   close(): void {
@@ -306,7 +369,15 @@ export class FactoryDb {
     for (const [k, v] of Object.entries(patch) as Array<[keyof IssuePatch, unknown]>) {
       if (v === undefined) continue
       sets.push(`${COLUMN[k]} = ?`)
-      vals.push(typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number | null))
+      vals.push(
+        typeof v === 'boolean'
+          ? v
+            ? 1
+            : 0
+          : Array.isArray(v)
+            ? JSON.stringify(v)
+            : (v as string | number | null),
+      )
     }
     if (sets.length) {
       this.db.prepare(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id)

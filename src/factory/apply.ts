@@ -6,7 +6,8 @@ import { ensureUp } from '../commands/vm.js'
 import { repoConfig, type RepoConfig } from '../config.js'
 import type { Ctx } from '../context.js'
 import { OarError } from '../errors.js'
-import { shq } from '../exec.js'
+import { redact, shq } from '../exec.js'
+import { ghRun, prSnapshot } from '../github.js'
 import { promptAgent, resumeHerdr, stopAgent, type HerdrHandle } from '../runner.js'
 import { loadState, mutateState, type Task } from '../state.js'
 import { hoursFromNow, nowIso } from '../time.js'
@@ -21,7 +22,28 @@ import {
 import type { FactoryDb } from './db.js'
 import type { Jobs } from './jobs.js'
 import { LinearClient, LinearError, newCommentId } from './linear.js'
-import type { Action, HumanComment, IssueRow, ReviewComment, StateKey } from './types.js'
+import {
+  findingsComment,
+  findingsLine,
+  findingsSummary,
+  parseReviewOutput,
+  REVIEW_SCHEMA,
+  reviewCommand,
+  reviewFiles,
+  reviewPrompt,
+  reviewWorktree,
+  verdictOf,
+  type ReviewOutput,
+} from './review.js'
+import type {
+  Action,
+  HumanComment,
+  IssueRow,
+  MergeMethod,
+  ReviewComment,
+  ReviewVerdict,
+  StateKey,
+} from './types.js'
 
 export interface ApplyDeps {
   db: FactoryDb
@@ -43,6 +65,15 @@ const STATE_TYPES: Record<StateKey, string> = {
 }
 
 const firstLine = (e: unknown) => ((e as Error).message ?? String(e)).split('\n')[0] ?? ''
+
+/** Registered secrets and GitHub tokens out, last lines only: safe to post on an issue. */
+const scrub = (text: string, lines = 6) =>
+  redact(text)
+    .replace(/\bgh[opsur]_[A-Za-z0-9]{20,}/g, '<redacted>')
+    .trim()
+    .split('\n')
+    .slice(-lines)
+    .join('\n')
 
 const kebab = (s: string) =>
   s
@@ -257,6 +288,22 @@ export class Applier {
             (e) => log(`${current.identifier}: review round failed: ${firstLine(e)}`),
           )
           break
+        case 'auto_review':
+          void jobs.run(
+            current.id,
+            current.repo,
+            () => this.autoReviewJob(current.id, a.sha),
+            (e) => log(`${current.identifier}: automated review failed: ${firstLine(e)}`),
+          )
+          break
+        case 'merge':
+          void jobs.run(
+            current.id,
+            current.repo,
+            () => this.mergeJob(current.id, a),
+            (e) => log(`${current.identifier}: merge failed: ${firstLine(e)}`),
+          )
+          break
         default:
           break
       }
@@ -273,9 +320,219 @@ export class Applier {
     await this.comment(
       fresh,
       `failed-${what}-${fresh.round}`,
-      `${this.deps.mention ? `${this.deps.mention} ` : ''}Could not ${what}: ${msg}. Move the issue back to Ready to retry${e instanceof OarError && e.hint ? ` (${e.hint})` : ''}.`,
+      `${this.deps.mention ? `${this.deps.mention} ` : ''}Could not ${what}: ${msg}. Move the issue back to ${this.deps.stateNames.ready} to retry${e instanceof OarError && e.hint ? ` (${e.hint})` : ''}.`,
     ).catch(() => undefined)
     await this.setState(fresh, 'needsInput').catch(() => undefined)
+  }
+
+  /** The job-side twin of decide's needsInput: park the issue and tell the human, never terminally. */
+  private async needInput(row: IssueRow, key: string, body: string): Promise<void> {
+    const { db, log } = this.deps
+    db.updateIssue(row.id, { phase: 'needs_input', jobStartedAt: null })
+    const fresh = db.issue(row.id) ?? row
+    const text = this.deps.mention ? `${this.deps.mention} ${body}` : body
+    await this.comment(fresh, key, text).catch((e: Error) =>
+      log(`${row.identifier}: could not comment ${key}: ${firstLine(e)}`),
+    )
+    await this.setState(fresh, 'needsInput').catch(() => undefined)
+  }
+
+  /** What follows a review, for the PR and issue comments. */
+  private reviewNext(row: IssueRow, verdict: ReviewVerdict): string {
+    const f = this.ctx.config.factory
+    if (verdict === 'block')
+      return row.reviewRounds >= f.review.maxRounds
+        ? 'The automated round limit is reached, so a human decides next.'
+        : 'The agent gets the blocking items as its next review round.'
+    if (row.labels.some((l) => l.toLowerCase() === f.holdLabel.toLowerCase()))
+      return `Ready to merge, but held by the \`${f.holdLabel}\` label; remove it to merge.`
+    if (!this.ctx.config.repos[row.repo]?.autoMerge)
+      return 'Ready to merge; auto-merge is off for this repo.'
+    return 'CI is green and nothing blocks, so the PR merges next.'
+  }
+
+  /**
+   * Check out the PR head detached on the worker VM, run the reviewer read-only, record its
+   * verdict for this SHA (an error too, so a broken reviewer runs once per SHA, never in a loop),
+   * and post the findings on the PR and the issue.
+   */
+  private async autoReviewJob(rowId: string, sha: string): Promise<void> {
+    const { db, log } = this.deps
+    const row = db.issue(rowId)
+    if (!row || row.phase !== 'review' || row.reviewedSha === sha) return
+    const task = taskFor(this.ctx, row)
+    if (!task) return this.reviewFailed(row, sha, 'no task is recorded for the issue')
+    const cfg = repoConfig(this.ctx.config, row.repo)
+    const review = this.ctx.config.factory.review
+    const files = reviewFiles(task.id)
+    const wt = reviewWorktree(cfg, task.id)
+    db.updateIssue(row.id, { jobStartedAt: new Date(this.ctx.now()).toISOString() })
+    db.event('review-start', `${review.runner} ${sha.slice(0, 7)}`, row.id, task.id)
+    let sandboxId: string | null = null
+    let out: ReviewOutput
+    try {
+      const up = await ensureUp(this.ctx, row.repo, log, { herdr: false })
+      sandboxId = up.vm.sandboxId
+      const prep = await runCommand(
+        this.ctx.boat,
+        sandboxId,
+        `git worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune; git fetch -q origin ${shq(cfg.baseBranch)} ${shq(task.branch)} && git worktree add -f --detach ${shq(wt)} ${shq(sha)}`,
+        { cwd: cfg.vmPath, timeoutSeconds: 300 },
+      )
+      if (prep.exitCode !== 0)
+        throw new Error(`could not check out ${sha.slice(0, 7)}: ${prep.stderr || prep.stdout}`)
+      await this.ctx.boat.writeFile(
+        sandboxId,
+        files.prompt,
+        reviewPrompt(row, cfg, { url: row.prUrl ?? '', headSha: sha }, review.blocking),
+      )
+      await this.ctx.boat.writeFile(sandboxId, files.schema, JSON.stringify(REVIEW_SCHEMA))
+      const timeoutSeconds = Math.round(review.timeoutMinutes * 60)
+      const r = await runCommand(
+        this.ctx.boat,
+        sandboxId,
+        reviewCommand(review.runner, { cwd: wt, files, timeoutSeconds, model: review.model }),
+        { timeoutSeconds: timeoutSeconds + 60 },
+      )
+      const text = await this.ctx.boat.readFile(sandboxId, files.out).catch(() => null)
+      if (r.exitCode !== 0 || !text?.trim()) {
+        const runLog = await this.ctx.boat.readFile(sandboxId, files.log).catch(() => null)
+        const how = r.timedOut || r.exitCode === 124 ? 'timed out' : `exited ${r.exitCode ?? '?'}`
+        throw new Error(`${review.runner} ${how}\n${runLog || r.stderr || r.stdout}`)
+      }
+      out = parseReviewOutput(review.runner, text)
+    } catch (e) {
+      return this.reviewFailed(row, sha, (e as Error).message ?? String(e))
+    } finally {
+      if (sandboxId)
+        await runCommand(
+          this.ctx.boat,
+          sandboxId,
+          `git worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune`,
+          { cwd: cfg.vmPath, timeoutSeconds: 60 },
+        ).catch(() => undefined)
+    }
+    const verdict = verdictOf(out.findings, review.blocking)
+    db.updateIssue(row.id, {
+      reviewedSha: sha,
+      reviewVerdict: verdict,
+      reviewFindings: out.findings,
+      jobStartedAt: null,
+    })
+    db.event(
+      'review',
+      `${verdict} ${sha.slice(0, 7)}: ${findingsLine(out.findings, review.blocking)}`,
+      row.id,
+      task.id,
+    )
+    const fresh = db.issue(row.id) ?? row
+    const next = this.reviewNext(fresh, verdict)
+    if (row.prNumber) {
+      const posted = await ghRun(
+        this.ctx.exec,
+        this.ctx.boat,
+        sandboxId,
+        ['pr', 'comment', String(row.prNumber), '--repo', cfg.github, '--body-file', '-'],
+        {
+          input: findingsComment(out, {
+            sha,
+            runner: review.runner,
+            blocking: review.blocking,
+            next,
+          }),
+        },
+      )
+      if (!posted.ok)
+        log(`${row.identifier}: could not comment on the PR: ${scrub(posted.stderr, 2)}`)
+    }
+    await this.comment(
+      fresh,
+      `review-${sha}`,
+      findingsSummary(out, {
+        sha,
+        runner: review.runner,
+        blocking: review.blocking,
+        prUrl: row.prUrl ?? '',
+        next,
+      }),
+    )
+  }
+
+  private async reviewFailed(row: IssueRow, sha: string, why: string): Promise<void> {
+    const { db, log } = this.deps
+    db.updateIssue(row.id, {
+      reviewedSha: sha,
+      reviewVerdict: 'error',
+      reviewFindings: [],
+      jobStartedAt: null,
+    })
+    db.event('review-error', `${sha.slice(0, 7)}: ${firstLine(scrub(why, 1))}`, row.id, row.taskId)
+    log(`${row.identifier}: automated review of ${sha.slice(0, 7)} failed: ${firstLine(why)}`)
+    const detail = scrub(why)
+    await this.needInput(
+      row,
+      `review-error-${sha}`,
+      `The automated review of ${row.prUrl ?? 'the PR'} failed, so nothing was merged. Reply here to run it again, or merge by hand.${detail ? `\n\n\`\`\`\n${detail}\n\`\`\`` : ''}`,
+    )
+  }
+
+  /**
+   * Merge once per head SHA: recorded before gh runs, `--match-head-commit` refuses a head that
+   * moved since the review. Success needs no follow-up: the next tick sees MERGED and closes out.
+   */
+  private async mergeJob(
+    rowId: string,
+    a: { number: number; sha: string; method: MergeMethod; isDraft: boolean },
+  ): Promise<void> {
+    const { db, log } = this.deps
+    const row = db.issue(rowId)
+    if (!row || row.phase !== 'review' || row.mergeSha === a.sha) return
+    const cfg = repoConfig(this.ctx.config, row.repo)
+    db.updateIssue(row.id, {
+      mergeSha: a.sha,
+      jobStartedAt: new Date(this.ctx.now()).toISOString(),
+    })
+    db.event('merge-start', `#${a.number} ${a.sha.slice(0, 7)} (${a.method})`, row.id, row.taskId)
+    const sandboxId = loadState(this.ctx.paths).vms[row.repo]?.sandboxId ?? null
+    const gh = (args: string[]) => ghRun(this.ctx.exec, this.ctx.boat, sandboxId, args)
+    try {
+      if (a.isDraft) {
+        const ready = await gh(['pr', 'ready', String(a.number), '--repo', cfg.github])
+        if (!ready.ok) throw new Error(`gh pr ready: ${ready.stderr || ready.stdout}`)
+      }
+      const m = await gh([
+        'pr',
+        'merge',
+        String(a.number),
+        '--repo',
+        cfg.github,
+        `--${a.method}`,
+        '--delete-branch',
+        '--match-head-commit',
+        a.sha,
+      ])
+      if (!m.ok) {
+        // `--delete-branch` can fail after the merge itself went through.
+        const task = taskFor(this.ctx, row)
+        const pr = task
+          ? await prSnapshot(this.ctx.exec, this.ctx.boat, sandboxId, cfg, task.branch).catch(
+              () => null,
+            )
+          : null
+        if (pr?.state !== 'MERGED') throw new Error(`gh pr merge: ${m.stderr || m.stdout}`)
+      }
+      db.updateIssue(row.id, { jobStartedAt: null })
+      db.event('merged-by-oar', `#${a.number} ${a.sha.slice(0, 7)}`, row.id, row.taskId)
+      log(`${row.identifier}: merged #${a.number} (${a.method})`)
+    } catch (e) {
+      const why = (e as Error).message ?? String(e)
+      db.event('merge-failed', firstLine(scrub(why, 1)), row.id, row.taskId)
+      await this.needInput(
+        db.issue(row.id) ?? row,
+        `merge-failed-${a.sha}`,
+        `Could not merge ${row.prUrl ?? `#${a.number}`}. Fix the cause and reply here to retry, or merge by hand.\n\n\`\`\`\n${scrub(why)}\n\`\`\``,
+      )
+    }
   }
 
   private async dispatchJob(rowId: string): Promise<void> {
@@ -368,6 +625,7 @@ export class Applier {
       ciSha?: string
       cursor?: string | null
       deliver?: HumanComment[]
+      reviewSha?: string
     },
   ): Promise<void> {
     const { db, log } = this.deps
@@ -390,6 +648,10 @@ export class Applier {
         handledCiSha: a.ciSha ?? row.handledCiSha ?? undefined,
         ciRounds: a.ciSha ? row.ciRounds + 1 : row.ciRounds,
         reviewCursor: a.cursor ?? row.reviewCursor ?? undefined,
+        reviewRoundSha: a.reviewSha,
+        reviewRounds: a.reviewSha ? row.reviewRounds + 1 : undefined,
+        // Whatever the round changes, the next head gets its own merge attempt.
+        mergeSha: null,
       })
       db.event(
         'round',
@@ -442,7 +704,7 @@ export class Applier {
       await this.comment(
         fresh,
         `round-${round}`,
-        `Round ${round} started: ${a.comments.length} review comment(s)${a.failed.length ? `, red CI (${a.failed.join(', ')})` : ''}.${ok ? '' : ' The prompt was sent but not confirmed; attach to check.'}`,
+        `Round ${round} started: ${a.reviewSha ? `${a.comments.filter((c) => c.blocking).length} blocking finding(s) from the automated review` : `${a.comments.length} review comment(s)`}${a.failed.length ? `, red CI (${a.failed.join(', ')})` : ''}.${ok ? '' : ' The prompt was sent but not confirmed; attach to check.'}`,
       )
       await this.setState(fresh, 'inProgress')
     } catch (e) {

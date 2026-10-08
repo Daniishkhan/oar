@@ -23,7 +23,9 @@ This is a disposable Linux VM. Nothing here is the developer's laptop.
   login (`gh auth status`).
 - A review round arrives as `/home/user/oar/tasks/<id>/review-<n>.md`: address every item, push
   to the same branch, run the gate, `touch .../done` again, and reply with a summary. Never
-  comment on the PR yourself and never open a second PR for the same issue.
+  comment on the PR yourself and never open a second PR for the same issue. Items marked
+  **blocking** come from the automated reviewer and must be fixed before the PR can merge; a
+  clean review merges the PR without anyone clicking, so push only finished work.
 
 # Seeing things
 

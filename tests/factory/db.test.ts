@@ -1,3 +1,7 @@
+import { mkdtempSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { FactoryDb, type IssueSync } from '../../src/factory/db.js'
 
@@ -219,5 +223,56 @@ describe('cursors and token store', () => {
     expect(store.get()).toEqual(rec)
     db.setCursor('linear.token', 'not json')
     expect(store.get()).toBeNull()
+  })
+})
+
+describe('migration', () => {
+  it('adds the review columns to a database created before them, idempotently', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'oar-db-')), 'factory.sqlite')
+    const old = new DatabaseSync(path)
+    old.exec(`CREATE TABLE issues (
+      id TEXT PRIMARY KEY, identifier TEXT NOT NULL, team TEXT NOT NULL, repo TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+      priority INTEGER NOT NULL DEFAULT 0, labels TEXT NOT NULL DEFAULT '[]', kind TEXT NOT NULL DEFAULT 'build',
+      linear_state TEXT NOT NULL DEFAULT '', linear_state_type TEXT NOT NULL DEFAULT '', last_set_state TEXT,
+      phase TEXT NOT NULL DEFAULT 'queued', round INTEGER NOT NULL DEFAULT 0, round_start_sha TEXT,
+      round_started_at TEXT, task_id TEXT, pr_number INTEGER, pr_url TEXT, handled_ci_sha TEXT,
+      ci_rounds INTEGER NOT NULL DEFAULT 0, review_cursor TEXT, job_started_at TEXT,
+      blocked_by TEXT NOT NULL DEFAULT '[]', gone INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '')`)
+    old.exec(
+      "INSERT INTO issues (id, identifier, team, repo, phase, round) VALUES ('i9', 'ENG-9', 'ENG', 'engine', 'review', 2)",
+    )
+    old.close()
+    const a = new FactoryDb(path)
+    expect(a.issue('i9')).toMatchObject({
+      phase: 'review',
+      round: 2,
+      reviewedSha: null,
+      reviewVerdict: null,
+      reviewFindings: [],
+      reviewRounds: 0,
+      reviewRoundSha: null,
+      mergeSha: null,
+    })
+    const findings = [
+      { severity: 'P1' as const, file: 'a', line: 1, title: 't', detail: 'd', fix: null },
+    ]
+    a.updateIssue('i9', {
+      reviewedSha: 'abc',
+      reviewVerdict: 'block',
+      reviewFindings: findings,
+      reviewRounds: 1,
+      mergeSha: null,
+    })
+    a.close()
+    const b = new FactoryDb(path)
+    expect(b.issue('i9')).toMatchObject({
+      reviewedSha: 'abc',
+      reviewVerdict: 'block',
+      reviewFindings: findings,
+      reviewRounds: 1,
+    })
+    b.close()
   })
 })
