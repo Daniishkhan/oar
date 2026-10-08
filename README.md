@@ -165,8 +165,9 @@ files to a new revision directory and remove those generated fields to publish c
 explicitly retire superseded issues. See the ticket skill for recovery of a stale lock.
 
 ```bash
-oar ticket check <plan>/tickets.json   # validate and preview the snapshot; no writes
+oar ticket check <plan>/tickets.json   # validate and preview; no writes
 oar ticket create <plan>/tickets.json  # publish to Backlog; safe to resume
+oar ticket refresh <plan>/tickets.json # re-render published descriptions after a template change
 oar factory check           # local rollout gate: staging/review configuration
 oar factory setup           # validate config; controller VM, bundle, tailnet, worker keys, states, service
 oar factory status          # phases per issue, VMs, last tick (forwarded over ssh)

@@ -409,3 +409,65 @@ export async function publishPlan(options: {
     release()
   }
 }
+
+/**
+ * Re-render the descriptions of a published plan with the current template. The data is the
+ * file's, unchanged; only the presentation moves. Every issue must already exist.
+ */
+export async function refreshPlan(options: {
+  path: string
+  linear: PublicationLinear
+}): Promise<{ parent: PublishedIssue | null; tickets: Array<PublishedIssue & { key: string }> }> {
+  const plan = readPlanFile(options.path)
+  const source = publicationSource(options.path, plan)
+  if (!plan.publication)
+    throw new OarError(
+      'state_invalid',
+      'this plan has not been published',
+      'oar ticket create first',
+    )
+  const order = orderTickets(plan.tickets)
+  const missing = order.filter((t) => !plan.created.tickets[t.key]).map((t) => t.key)
+  if (missing.length || (plan.plan && !plan.created.plan))
+    throw new OarError(
+      'state_invalid',
+      `not every issue exists yet: ${missing.join(', ') || 'the plan issue'}`,
+      'oar ticket create finishes the publication first',
+    )
+  const context: PublicationContext = { id: plan.publication.id, ...source }
+  const { linear } = options
+  let parent: PublishedIssue | null = null
+  if (plan.plan && plan.created.plan) {
+    const issue = await linear.issue(plan.created.plan)
+    if (!issue)
+      throw new OarError('state_invalid', `${plan.created.plan} (the plan issue) no longer exists`)
+    parent = { ...issue, title: plan.plan.title }
+  }
+  const made = new Map<string, PublishedIssue>()
+  for (const t of order) {
+    const ref = plan.created.tickets[t.key]!
+    const issue = await linear.issue(ref)
+    if (!issue) throw new OarError('state_invalid', `${ref} (ticket ${t.key}) no longer exists`)
+    made.set(t.key, { ...issue, title: t.title })
+  }
+  for (const t of order)
+    await linear.updateIssue(made.get(t.key)!.id, {
+      description: renderTicket(t, {
+        deps: t.dependsOn.map((d) => made.get(d)!),
+        plan: parent,
+        publication: { ...context, taskKey: t.key },
+      }),
+    })
+  if (parent && plan.plan)
+    await linear.updateIssue(parent.id, {
+      description: renderPlan(
+        plan.plan,
+        order.map((t) => ({
+          ...made.get(t.key)!,
+          after: t.dependsOn.map((d) => made.get(d)!.identifier),
+        })),
+        context,
+      ),
+    })
+  return { parent, tickets: order.map((t) => ({ ...made.get(t.key)!, key: t.key })) }
+}

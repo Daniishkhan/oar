@@ -21,7 +21,7 @@ const HELP = `oar — Claude and Codex coding on boat.dev, from repository plans
   oar watch [--until-idle]      poll live tasks, notify on blocked/done, keep the VM alive
   oar doctor [--repo r] [--quiet]
   oar factory setup|deploy|check|status|evidence|log|pause|resume|attach|up|stop|doctor|states
-  oar ticket example|check|create   a planned piece of work → Linear tickets in Backlog
+  oar ticket example|check|create|refresh   a planned piece of work → Linear tickets in Backlog
 
 vm
   new <repo> [--no-login] [--type small|default|large]   create from the boat environment, run setup, log Claude in, register in Herdr

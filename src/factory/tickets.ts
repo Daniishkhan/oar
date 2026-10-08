@@ -20,8 +20,10 @@ export const TicketSchema = z.object({
   scope: z.object({ in: z.array(text).min(1), out: z.array(text).default([]) }),
   /** Pointers found while planning: files, functions, tests, docs. */
   context: z.string().trim().optional(),
-  /** Choices the human makes; the agent asks before acting on each. */
+  /** Settled during planning; the agent must not reopen them. */
   decisions: z.array(text).default([]),
+  /** Still open; the agent asks on the issue before acting on each. */
+  questions: z.array(text).default([]),
   /** The one check the human runs on staging (or in the app) to accept the work. */
   stagingCheck: text,
   dependsOn: z.array(z.string()).default([]),
@@ -132,16 +134,44 @@ export interface PublicationContext {
   taskKey?: string
 }
 
-/** Included in the issue body, so workers can read the pinned draft even before it is pushed. */
-function renderPublication(p: PublicationContext): string {
-  return [
-    '## Published source',
-    '',
-    `Publication: \`${p.id}\`${p.taskKey ? ` · Task: \`${p.taskKey}\`` : ''}`,
-    `Snapshot SHA-256: \`${p.contentHash}\``,
-    `Source: \`${p.sourceFile}\`${p.document ? ` and \`${p.document.path}\`` : ''}. This identifies the published contents, not a Git commit.`,
-    ...(p.document ? ['', '## Published plan snapshot', '', p.document.content.trim()] : []),
-  ].join('\n')
+/** One line of provenance for the plan issue; the tickets stay free of it. */
+function renderProvenance(p: PublicationContext): string {
+  return `Published from \`${p.sourceFile}\`${p.document ? ` and \`${p.document.path}\`` : ''} · publication \`${p.id}\` · snapshot SHA-256 \`${p.contentHash}\` (the published contents, not a Git commit).`
+}
+
+const FENCE = /^\s*(```|~~~)/
+/** A line that starts its own block and must not be joined onto the previous one. */
+const BLOCK_START = /^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||-{3,}\s*$|\*{3,}\s*$|={3,}\s*$|<)/
+
+/**
+ * Plan documents are hard-wrapped for an editor, but Linear shows every newline, so a wrapped
+ * paragraph or list item turns into ragged lines. Join continuation lines back onto the line
+ * they continue; headings, list items, quotes, tables, rules and fenced code stay as they are.
+ */
+export function unwrapMarkdown(text: string): string {
+  const out: string[] = []
+  let fenced = false
+  for (const line of text.split('\n')) {
+    if (FENCE.test(line)) {
+      fenced = !fenced
+      out.push(line)
+      continue
+    }
+    const prev = out[out.length - 1]
+    const continues =
+      !fenced &&
+      prev !== undefined &&
+      prev.trim() !== '' &&
+      !FENCE.test(prev) &&
+      !/^\s{0,3}#{1,6}\s/.test(prev) &&
+      !/^\s*\|/.test(prev) &&
+      !/( {2,}|\\)$/.test(prev) &&
+      line.trim() !== '' &&
+      !BLOCK_START.test(line)
+    if (continues) out[out.length - 1] = `${prev.replace(/\s+$/, '')} ${line.trim()}`
+    else out.push(line)
+  }
+  return out.join('\n')
 }
 
 const bullets = (items: string[], box = false) =>
@@ -162,13 +192,25 @@ export function renderTicket(
   if (t.context) parts.push(`## Context\n\n${t.context}`)
   if (t.decisions.length)
     parts.push(
-      `## Decisions to ask about\n\nAsk on this issue before acting on any of these:\n\n${bullets(t.decisions)}`,
+      `## Decisions\n\nSettled during planning; do not reopen them:\n\n${bullets(t.decisions)}`,
+    )
+  if (t.questions.length)
+    parts.push(
+      `## Open questions\n\nAsk on this issue before acting on any of these:\n\n${bullets(t.questions)}`,
     )
   parts.push(`## Staging check\n\n${t.stagingCheck}`)
   if (o.deps?.length)
     parts.push(`## Depends on\n\n${bullets(o.deps.map((d) => `${d.identifier} ${d.title}`))}`)
-  if (o.plan) parts.push(`---\n\nPart of ${o.plan.identifier}: ${o.plan.title}.`)
-  if (o.publication) parts.push(renderPublication(o.publication))
+  // The plan and its provenance live on the plan issue; a lone ticket carries them itself.
+  if (o.plan)
+    parts.push(
+      `---\n\nPart of ${o.plan.identifier}: ${o.plan.title}. The full plan is on that issue.`,
+    )
+  else if (o.publication) {
+    if (o.publication.document)
+      parts.push(`## Plan\n\n${unwrapMarkdown(o.publication.document.content).trim()}`)
+    parts.push(renderProvenance(o.publication))
+  }
   return `${parts.join('\n\n')}\n`
 }
 
@@ -191,7 +233,9 @@ export function renderPlan(
   parts.push(
     `---\n\nThis is a plan issue (label \`${SPEC_LABEL}\`): the factory never builds it. Move its tickets to Todo; a ticket waits until the tickets it depends on are done.`,
   )
-  if (publication) parts.push(renderPublication(publication))
+  if (publication?.document)
+    parts.push(`## Plan\n\n${unwrapMarkdown(publication.document.content).trim()}`)
+  if (publication) parts.push(renderProvenance(publication))
   return `${parts.join('\n\n')}\n`
 }
 
@@ -244,7 +288,8 @@ export const EXAMPLE_PLAN: z.input<typeof PlanFileSchema> = {
         'Paths that carry capabilities are logged the way LoggingMiddleware already redacts them.',
       ],
       scope: { in: ['nodes/core/middleware/logging.py'], out: [] },
-      decisions: ['The threshold: 500 ms, 1 s or 2 s.'],
+      decisions: ['Warn, do not error: slow is not broken.'],
+      questions: ['The threshold: 500 ms, 1 s or 2 s.'],
       stagingCheck:
         'A deliberately slow staging request shows one warning line with its X-Request-ID.',
       dependsOn: ['request-id'],

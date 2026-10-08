@@ -15,7 +15,7 @@ describe('ticket command preview', () => {
     writeFileSync(join(w.home, 'plan.md'), '# Repo plan\n\nThe exact local design.')
     expect(await ticketCmd(w.ctx, ['check', path])).toBe(0)
     expect(w.out.join('\n')).toContain('The exact local design.')
-    expect(w.out.join('\n')).toMatch(/Snapshot SHA-256: `[0-9a-f]{64}`/)
+    expect(w.out.join('\n')).toMatch(/snapshot SHA-256 `[0-9a-f]{64}`/)
     expect(readFileSync(path, 'utf8')).toBe(original)
     expect(existsSync(`${path}.publish.lock`)).toBe(false)
   })

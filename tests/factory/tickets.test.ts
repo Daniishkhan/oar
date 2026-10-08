@@ -3,13 +3,14 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readPlanFile, ticketCreate, ticketDryRun } from '../../src/commands/ticket.js'
 import type { LinearClient } from '../../src/factory/linear.js'
-import { publishPlan } from '../../src/factory/publication.js'
+import { publishPlan, refreshPlan } from '../../src/factory/publication.js'
 import {
   EXAMPLE_PLAN,
   orderTickets,
   PlanFileSchema,
   renderPlan,
   renderTicket,
+  unwrapMarkdown,
   TicketSchema,
   type Ticket,
 } from '../../src/factory/tickets.js'
@@ -191,7 +192,8 @@ describe('rendering', () => {
     const text = renderTicket(
       ticket({
         context: 'See LoggingMiddleware.',
-        decisions: ['The threshold'],
+        decisions: ['Warn, do not error.'],
+        questions: ['The threshold'],
         scope: { in: ['src/a.ts'], out: ['nginx'] },
       }),
       {
@@ -206,7 +208,8 @@ describe('rendering', () => {
       '## Non-functional criteria',
       '## Scope',
       '## Context',
-      '## Decisions to ask about',
+      '## Decisions',
+      '## Open questions',
       '## Staging check',
       '## Depends on',
       'Part of CNO-1',
@@ -218,6 +221,91 @@ describe('rendering', () => {
     expect(text).toContain('- [ ] n1')
     expect(text).toContain('**Out**\n\n- nginx')
     expect(text).toContain('- CNO-2 Do B')
+    expect(text).toContain('Settled during planning')
+    expect(text).toContain('Ask on this issue before acting')
+  })
+
+  it('keeps the plan and its provenance on the plan issue, not on the tickets', () => {
+    const publication = {
+      id: 'pub-1',
+      contentHash: 'a'.repeat(64),
+      sourceFile: 'tickets.json',
+      document: { path: 'plan.md', content: '# Plan\n\nA long\nwrapped line.\n' },
+    }
+    const withParent = renderTicket(ticket(), {
+      plan: { identifier: 'CNO-1', title: 'The plan' },
+      publication,
+    })
+    expect(withParent).toContain('The full plan is on that issue')
+    expect(withParent).not.toContain('wrapped line')
+    expect(withParent).not.toContain('SHA-256')
+    const alone = renderTicket(ticket(), { publication })
+    expect(alone).toContain('## Plan\n\n# Plan\n\nA long wrapped line.')
+    expect(alone).toContain('snapshot SHA-256 `' + 'a'.repeat(64) + '`')
+    const plan = renderPlan({ title: 'P', summary: 'Why.' }, [], publication)
+    expect(plan.indexOf('never builds it')).toBeLessThan(plan.indexOf('## Plan'))
+    expect(plan).toContain('A long wrapped line.')
+    expect(plan.trim().endsWith('(the published contents, not a Git commit).')).toBe(true)
+  })
+
+  it('joins hard-wrapped Markdown for Linear without touching structure', () => {
+    const source = [
+      '# Title',
+      '',
+      'A paragraph that was',
+      'wrapped twice',
+      'by an editor.',
+      '',
+      '- a list item that',
+      '  continues here',
+      '  * nested item',
+      '    with its own continuation',
+      '1. numbered',
+      '2. items stay',
+      '',
+      '> a quote',
+      'continues',
+      '',
+      '| a | b |',
+      '| - | - |',
+      '',
+      '```',
+      'code stays',
+      'exactly',
+      '```',
+      '',
+      'Last line  ',
+      'after a hard break',
+      '',
+      '---',
+    ].join('\n')
+    expect(unwrapMarkdown(source)).toBe(
+      [
+        '# Title',
+        '',
+        'A paragraph that was wrapped twice by an editor.',
+        '',
+        '- a list item that continues here',
+        '  * nested item with its own continuation',
+        '1. numbered',
+        '2. items stay',
+        '',
+        '> a quote continues',
+        '',
+        '| a | b |',
+        '| - | - |',
+        '',
+        '```',
+        'code stays',
+        'exactly',
+        '```',
+        '',
+        'Last line  ',
+        'after a hard break',
+        '',
+        '---',
+      ].join('\n'),
+    )
   })
 
   it('leaves out empty optional sections', () => {
@@ -271,6 +359,25 @@ describe('oar ticket create', () => {
       planListed: true,
     })
     expect(w.out.join('\n')).toContain('CNO-3  Log slow CNO API requests  (after CNO-2)')
+  })
+
+  it('refreshes published descriptions with the current template and nothing else', async () => {
+    const { w, path, linear } = setup()
+    await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
+    linear.calls = []
+    for (const issue of linear.issues.values()) issue.description = 'stale'
+    const result = await refreshPlan({ path, linear: linear as unknown as LinearClient })
+    expect(linear.calls).toEqual(['update id-CNO-2', 'update id-CNO-3', 'update id-CNO-1'])
+    expect(result.tickets.map((t) => t.identifier)).toEqual(['CNO-2', 'CNO-3'])
+    expect(linear.issues.get('CNO-3')!.description).toContain('## Open questions')
+    expect(linear.issues.get('CNO-3')!.description).toContain('Part of CNO-1')
+    expect(linear.issues.get('CNO-1')!.description).toContain('2. CNO-3 Log slow CNO API requests')
+    expect(JSON.parse(readFileSync(path, 'utf8')).created.planListed).toBe(true)
+    const unpublished = join(w.home, 'fresh.json')
+    writeFileSync(unpublished, JSON.stringify(EXAMPLE_PLAN))
+    await expect(
+      refreshPlan({ path: unpublished, linear: linear as unknown as LinearClient }),
+    ).rejects.toThrow('not been published')
   })
 
   it('resumes after a failure without creating anything twice', async () => {
@@ -343,7 +450,8 @@ describe('oar ticket create', () => {
     }
     await ticketCreate(w.ctx, path, readPlanFile(path), linear as unknown as LinearClient)
     const saved = readPlanFile(path)
-    expect(linear.issues.get('CNO-2')!.description).toContain(saved.publication!.contentHash)
+    expect(linear.issues.get('CNO-1')!.description).toContain(saved.publication!.contentHash)
+    expect(linear.issues.get('CNO-2')!.description).not.toContain(saved.publication!.contentHash)
     expect(existsSync(`${path}.publish.lock`)).toBe(false)
   })
 
@@ -400,9 +508,15 @@ describe('oar ticket create', () => {
     )
     writeFileSync(path, JSON.stringify(plan))
     await ticketCreate(w.ctx, path, plan, linear as unknown as LinearClient)
-    for (const issue of linear.issues.values()) {
-      expect(issue.description).toContain('Unpushed but fully available to the worker.')
-      expect(issue.description).toContain('not a Git commit')
+    const parent = linear.issues.get('CNO-1')!.description
+    expect(parent).toContain(
+      '## Plan\n\n# Draft design\n\nUnpushed but fully available to the worker.',
+    )
+    expect(parent).toContain('not a Git commit')
+    for (const identifier of ['CNO-2', 'CNO-3']) {
+      const description = linear.issues.get(identifier)!.description
+      expect(description).not.toContain('Unpushed but fully available')
+      expect(description).toContain('Part of CNO-1')
     }
     writeFileSync(join(w.home, 'plan.md'), '# Different design')
     await expect(

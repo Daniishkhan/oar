@@ -2,7 +2,12 @@ import type { Ctx } from '../context.js'
 import { usage } from '../errors.js'
 import { LinearClient, type TokenRecord } from '../factory/linear.js'
 import { linearAuth } from '../factory/loop.js'
-import { publicationSource, publishPlan, readPlanFile } from '../factory/publication.js'
+import {
+  publicationSource,
+  publishPlan,
+  readPlanFile,
+  refreshPlan,
+} from '../factory/publication.js'
 export { readPlanFile } from '../factory/publication.js'
 import {
   EXAMPLE_PLAN,
@@ -58,6 +63,15 @@ export function ticketDryRun(ctx: Ctx, plan: PlanFile, publication?: Publication
       }),
     )
   }
+  const long = order.flatMap((t) =>
+    [...t.functional, ...t.nonFunctional]
+      .filter((c) => c.length > 200)
+      .map((c) => `${t.key}: ${c.slice(0, 70)}…`),
+  )
+  if (long.length)
+    out(
+      `note: ${long.length} criteria over 200 characters read badly on a Linear card; one checkable sentence each, with the detail under Context:\n  ${long.join('\n  ')}`,
+    )
   out(
     `${order.length} ticket(s)${plan.plan ? ' under one plan issue' : ''} for team ${plan.team}, created in Backlog. Nothing was sent to Linear.`,
   )
@@ -97,6 +111,18 @@ export async function ticketCmd(ctx: Ctx, args: string[]): Promise<number> {
     case 'example':
       ctx.io.out(JSON.stringify(EXAMPLE_PLAN, null, 2))
       return 0
+    case 'refresh': {
+      const path = rest.find((a) => !a.startsWith('--'))
+      if (!path) throw usage('oar ticket refresh <plan.json>')
+      const result = await refreshPlan({ path, linear: ticketLinear(ctx) })
+      if (result.parent)
+        ctx.io.out(`${result.parent.identifier}  ${result.parent.title}  ${result.parent.url}`)
+      for (const t of result.tickets) ctx.io.out(`${t.identifier}  ${t.title}  ${t.url}`)
+      ctx.io.out(
+        'Descriptions re-rendered with the current template; the published data is unchanged.',
+      )
+      return 0
+    }
     case 'check':
     case 'create': {
       const dry = rest.includes('--dry-run') || sub === 'check'

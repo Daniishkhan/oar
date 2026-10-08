@@ -32,9 +32,10 @@ UUIDs with Linear, including a successful remote create whose response was lost.
 already exist in Linear; missing labels produce a notice and are omitted.
 
 Keep `plan.md` and `tickets.json`, including the generated `publication` and `created` receipts:
-they are the record of what was published. The command publishes the exact Markdown inline in
-each issue, so the builder reads the plan from Linear and nothing has to be pushed; the source
-SHA-256 identifies these contents, not a Git revision. The command never commits or pushes.
+they are the record of what was published. The command publishes the plan's Markdown on the
+plan issue (unwrapped for Linear), where the builder reads it, and keeps the tickets short; the
+source SHA-256 identifies these contents, not a Git revision. `oar ticket refresh <file>`
+re-renders published descriptions after a template change, without touching the data. The command never commits or pushes.
 
 Published definitions are immutable, even on a partial run. To change scope, copy the two files to
 a `<slug>-v2/` directory next to them, remove `publication` and `created` from the new JSON,
@@ -65,8 +66,11 @@ resume. Never delete it while a publisher is active. Do not edit or copy a plan 
   (`out`), which keeps the agent from drifting.
 - **Context**: pointers the agent would otherwise rediscover (file:line, functions, tests, docs).
   Not a full design unless the user decided it.
-- **Decisions**: resolve consequential choices during planning before moving work to Todo. If a
-  choice remains unresolved, list it explicitly; the worker will ask on the issue and pause.
+- **Decisions**: the choices settled during planning, as statements; the builder must not reopen
+  them. **Open questions** (`questions`): choices still unresolved, each one a question; the
+  builder asks on the issue and pauses, so resolve as many as you can before moving work to Todo.
+- **Short criteria.** One checkable sentence per entry, ideally under 160 characters; put the
+  detail (table names, columns, thresholds) under Context. `oar ticket check` flags long ones.
 - **Staging check**: an observable acceptance check that can run unattended after deployment,
   preferably a committed Playwright test, API assertion, or smoke-test command. For projects
   without staging, specify the app check and configure an explicit delivery policy.
@@ -104,7 +108,7 @@ resume. Never delete it while a publisher is active. Do not edit or copy a plan 
 ```
 
 Required per ticket: `key` (lowercase, dashes), `title`, `goal`, `jobs`, `functional`,
-`nonFunctional`, `scope.in`, `stagingCheck`. Optional: `context`, `decisions`, `dependsOn`,
+`nonFunctional`, `scope.in`, `stagingCheck`. Optional: `context`, `decisions`, `questions`, `dependsOn`,
 `priority` (1 urgent to 4 low), `labels`. `plan` is required when there is more than one ticket.
 Top-level `document` is an optional Markdown path relative to the JSON file. Legacy JSON-only
 plans remain supported. Do not write `created` or `publication` yourself; `oar ticket create`

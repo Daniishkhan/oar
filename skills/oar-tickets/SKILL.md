@@ -24,17 +24,20 @@ in Backlog, where nothing happens until a human moves one to Todo.
    identifiers instead of publishing again, unless the user passed a new revision directory.
 2. **Learn the schema.** Run `oar ticket example`; its output is a valid file. Required per
    ticket: `key` (lowercase, dashes), `title`, `goal`, `jobs`, `functional`, `nonFunctional`,
-   `scope.in`, `stagingCheck`. Optional: `scope.out`, `context`, `decisions`, `dependsOn`
-   (keys of tickets that must be delivered first), `priority` (1 urgent to 4 low), `labels`.
-   `plan` (title and summary) is required when there is more than one ticket. Set
-   `"document": "plan.md"` so the plan's Markdown is embedded in every issue.
+   `scope.in`, `stagingCheck`. Optional: `scope.out`, `context`, `decisions` (settled, as
+   statements), `questions` (still open, as questions), `dependsOn` (keys of tickets that must
+   be delivered first), `priority` (1 urgent to 4 low), `labels`. `plan` (title and summary) is
+   required when there is more than one ticket. Set `"document": "plan.md"` so the plan's
+   Markdown is published on the plan issue, where the builder reads it.
 3. **Pick the team.** The plan names its repository or team (nodes-cno → `CNO`,
    nodes-engine → `ENG`). If it does not, use the repository you are in (`oar doctor --quiet`
    names it) and say so in the report.
 4. **Write `tickets.json`** beside the plan. Map each ticket section onto the fields in the
    plan's own words: Goal, Jobs to be done, Functional criteria, Non-functional criteria, Scope
-   in and out, Context, Decisions, Staging check, Depends on. Criteria are checkable sentences,
-   one per entry. Where the plan leaves a required field empty, write the most conservative
+   in and out, Context, Decisions, Open questions, Staging check, Depends on. Criteria are
+   checkable sentences, one per entry and ideally under 160 characters: a Linear card is read on
+   a phone. Move detail (table names, columns, thresholds) into Context. A settled choice goes
+   under `decisions`; only a question the user still has to answer goes under `questions`. Where the plan leaves a required field empty, write the most conservative
    reading of the plan and list it under "Inferred" in your report; never add scope or a ticket
    the plan does not describe. Leave out branch names, gate commands and finish steps.
 5. **Check.** `oar ticket check <tickets.json>`. Fix every problem it names and run it again

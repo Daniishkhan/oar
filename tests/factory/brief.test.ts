@@ -235,9 +235,16 @@ describe('plan context in the brief', () => {
       identifier: 'ENG-9',
       title: 'T',
       url: 'u',
-      description: 'x'.repeat(9000),
+      description: 'x'.repeat(41_000),
     })
     expect(text).toContain('…(truncated; read the rest on Linear)')
+    const whole = issueBrief(issue(), [], 'engine', {
+      identifier: 'ENG-9',
+      title: 'T',
+      url: 'u',
+      description: 'y'.repeat(20_000),
+    })
+    expect(whole).not.toContain('truncated')
   })
 })
 
@@ -277,7 +284,7 @@ describe('automated review in briefs', () => {
   it('asks the builder to account for every criterion and to ask about open decisions', () => {
     const extra = factoryFooter(task, issue()).extra?.join('\n') ?? ''
     expect(extra).toContain('"Criteria" section to the PR body')
-    expect(extra).toContain('"Decisions to ask about"')
+    expect(extra).toContain('"Open questions"')
     expect(extra).toContain('what is listed under Out stays untouched')
   })
 })

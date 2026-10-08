@@ -17,7 +17,7 @@ export interface ParentPlan {
   description: string
 }
 
-const PLAN_MAX_CHARS = 8000
+const PLAN_MAX_CHARS = 40_000
 
 /** The markdown the agent reads first: the issue as the human wrote it, plus the discussion so far. */
 export function issueBrief(
@@ -78,7 +78,7 @@ export function factoryFooter(task: Task, issue: IssueRow): FooterOptions {
       `- A review round arrives as \`${vmTaskDir(task.id)}/review-<n>.md\`. Address every item, push, run the gate, then \`touch ${vmTaskDir(task.id)}/done\` again and reply with a summary of what changed.`,
       '- Once CI is green an automated reviewer reads every push. Its P0/P1 findings come back to you as a review round; a clean review merges the PR without anyone clicking, so the PR must be complete when you touch `done`.',
       '- When the issue lists Functional and Non-functional criteria, meet every one and add a "Criteria" section to the PR body: each criterion with how the change meets it and how you verified it (a test name or a command). The reviewer checks the same list, and an unmet criterion blocks the merge.',
-      '- When the issue has "Decisions to ask about", ask each one with question.md before you act on it, unless the discussion already answers it. Respect its Scope: what is listed under Out stays untouched.',
+      '- When the issue has "Open questions", ask each one with question.md before you act on it, unless the discussion already answers it. Its "Decisions" are settled: do not reopen them. Respect its Scope: what is listed under Out stays untouched.',
     ],
   }
 }
