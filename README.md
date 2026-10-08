@@ -1,9 +1,16 @@
 # oar
 
-Remote coding on [boat.dev](https://boat.dev) for one developer: one long-lived VM per repo,
-the [Herdr](https://herdr.dev) server on the VM, Claude Code tasks dispatched into Herdr panes
-and tracked to draft PRs. Close the lid; the agents keep going. Steer from the Claude phone app
-through Remote Control.
+Remote coding agents on [boat.dev](https://boat.dev) VMs, from a one-off task to a software
+factory. oar has two layers:
+
+- **The CLI** gives one developer a long-lived VM per repo with the
+  [Herdr](https://herdr.dev) server on it. Claude Code tasks are dispatched into Herdr panes and
+  tracked to draft PRs. Close the lid; the agents keep going, and you can steer them from the
+  Claude phone app through Remote Control.
+- **The factory** is an always-on controller VM that turns Linear issues into merged PRs. Move
+  an issue to Todo and an agent builds it, CI runs, an automated reviewer checks the PR, and a
+  clean review merges it. Your only step is validating on staging. See
+  [Factory](#factory-linear--agents-no-mac-in-the-loop).
 
 ```
 oar vm new engine        # create the VM from boat environment "engine", run setup, log Claude in, register in Herdr
@@ -122,8 +129,66 @@ shipped defaults first (nodes-cno: base `dev`, deploy workflow `staging.yml`).
 
 ## Development
 
-`pnpm verify` = typecheck, format check, lint, tests. Unit tests use a scripted fake boat client
-and a recording fake exec; nothing touches the network. `pnpm dev -- <args>` runs from source.
+Requirements: Node 24 (the factory uses `node:sqlite`) and pnpm 12, as pinned in `package.json`.
+
+```bash
+pnpm install
+pnpm dev -- status         # run from source
+pnpm verify                # typecheck, format check, lint, tests; must be green before a commit
+pnpm install:local         # build dist/oar.mjs, link ~/.local/bin/oar, copy the skill
+oar factory deploy         # ship the build and the config to the controller, restart it
+```
+
+Unit tests use a scripted fake boat client (`tests/fakes/boat.ts`) and a recording fake exec
+(`tests/fakes/exec.ts`); nothing touches the network. `pnpm format` fixes formatting.
+
+### Code map
+
+| Path                                                                                       | What                                                                                              |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| [src/cli.ts](src/cli.ts)                                                                   | Argument parsing, help text, exit codes; the only place that exits                                |
+| [src/config.ts](src/config.ts)                                                             | Config schema and shipped defaults, secrets from `~/.config/oar/env`                              |
+| [src/boat.ts](src/boat.ts), [src/ssh.ts](src/ssh.ts), [src/herdr.ts](src/herdr.ts)         | boat API client and commands on a VM, ssh aliases and pinned host keys, the Herdr client          |
+| [src/runner.ts](src/runner.ts)                                                             | Agents in Herdr panes: dispatch, state, read, prompt, steer, stop, resume                         |
+| [src/brief.ts](src/brief.ts), [src/github.ts](src/github.ts), [src/state.ts](src/state.ts) | Task briefs and their footer, PR lookups and `gh` calls, `state.json`                             |
+| [src/commands/](src/commands)                                                              | `vm`, `task`, `status`, `watch`, `doctor` and `factory` subcommands                               |
+| [src/factory/](src/factory)                                                                | The controller, below                                                                             |
+| [setup/](setup), [vm/](vm), [templates/](templates), [skill/](skill)                       | VM setup scripts and units, files copied onto VMs, brief and reviewer templates, the Claude skill |
+
+### The factory controller
+
+One tick every 30 seconds, in [loop.ts](src/factory/loop.ts): sync Linear, then for each active
+issue observe, decide and apply, then the keeper.
+
+- [observe.ts](src/factory/observe.ts) gathers facts about an issue and never writes.
+- [reconcile.ts](src/factory/reconcile.ts) `decide()` is a pure function from an issue row and
+  its facts to actions. Every transition is a row in `tests/factory/reconcile.test.ts`.
+- [apply.ts](src/factory/apply.ts) runs the actions. Anything slow (dispatch, resume, a review
+  round, the automated review, the merge) is a job under a per-repo lock ([jobs.ts](src/factory/jobs.ts)).
+- [db.ts](src/factory/db.ts) is the SQLite store. New columns go in `SCHEMA` and in the additive
+  migration list, because the live controller database already exists.
+- [linear.ts](src/factory/linear.ts), [github.ts](src/factory/github.ts), [review.ts](src/factory/review.ts),
+  [brief.ts](src/factory/brief.ts) and [keeper.ts](src/factory/keeper.ts) hold the Linear client,
+  the GitHub feeds, the automated reviewer, the agent-facing text and VM uptime.
+
+Rules that keep the controller safe to restart at any moment:
+
+- Linear is the only state machine. The controller writes a Linear state only on a phase change.
+- Comments are idempotent per issue and key, and every prompt carries an `[oar r<n>]` round token.
+- A merge is attempted at most once per head SHA, and a reviewer failure is recorded so it never
+  loops.
+- Nothing the agent or the PR controls may configure the controller or the reviewer.
+
+To add a repo: a `repos.<key>` entry in the config, its Linear team in `factory.linear.teams`,
+`oar vm new <key>`, then `oar factory setup`. No code changes. A new capability should be a new
+action and job driven by config, not a per-repo branch in the code.
+
+### Roadmap
+
+Built: the CLI, the controller, questions and replies through Linear, review and CI rounds, the
+staging result, automated P0/P1 review and auto-merge. Next: a separate verify sandbox (UI and
+end-to-end checks), a `validate` gate after staging and automatic promotion, inspection and spec
+recipes that write Linear issues, parallel builds on forked VMs, and HTML or Figma prototyping.
 
 ### Confirmed on first real use
 
@@ -146,7 +211,8 @@ Update this list as the end-to-end checks from the plan are run against the real
 - [x] `herdr machine add <alias> --label <l> --remote-session default` works non-interactively once the server runs on the VM (2026-10-07)
 - [x] Codex CLI is on both worker images (`/usr/local/bin/codex`); engine has a saved login (2026-10-08). The factory's automated reviewer needs it on every repo VM: `oar vm login <repo> --codex`
 - [x] boat `sshKey` appends (not replaces) authorized keys: the Mac's and the controller's keys both stay on the workers (2026-10-08); every host re-appends its own key on `vm up` anyway
-- [x] `ttlSeconds: null` accepted at creation for the controller sandbox; `archiveAfter` reads null (2026-10-08, bx_w55wbqrq)
+- [x] `ttlSeconds: null` accepted at creation for the controller sandbox; `archiveAfter` reads null (2026-10-08)
+- [x] Factory end to end on nodes-cno: Todo, agent, draft PR to `dev`, green CI, Codex review with no findings, auto-merge, Done, staging deploy success, in 26 minutes with no human click (2026-10-08, CNO-1)
 - [x] Linux Herdr client forwards `--machine` to another VM: `herdr machine add oar-engine --label engine --remote-session default` on the controller, then `herdr --machine engine agent list` answers (2026-10-08)
 - [x] Linear client-credentials token works for `viewer` (app user "oar"), `issueUpdate`, `commentCreate` with a client id and `attachmentLinkGitHubPR`; `workflowStateCreate` is refused ("not allowed to take action"), so `oar factory setup` reports missing states and they are added in Settings → Teams → Issue statuses (2026-10-08)
 - [ ] A comment from the "oar" app user pushes to the phone (it does raise an Inbox notification in Linear, 2026-10-08)
