@@ -182,7 +182,11 @@ function setup() {
       engine: {
         ...DEFAULT_CONFIG.repos.engine!,
         worktreeInit: [],
+        baseBranch: 'main',
         deliveryMode: 'merge',
+        deployWorkflow: undefined,
+        verifyWorkflow: undefined,
+        reviewEnvName: undefined,
         requiredChecks: [],
       },
     },

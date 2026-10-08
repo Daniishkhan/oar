@@ -14,6 +14,7 @@ function setup() {
     repos: {
       engine: {
         ...DEFAULT_CONFIG.repos.engine,
+        baseBranch: 'main',
         deliveryMode: 'staging',
         requiredChecks: [],
         deployWorkflow: 'deploy.yml',

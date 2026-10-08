@@ -63,11 +63,16 @@ describe('backfillRepoDefaults', () => {
           baseBranch: 'release',
           requiredChecks: [],
           deliveryMode: undefined,
+          deployWorkflow: undefined,
+          verifyWorkflow: undefined,
+          reviewEnvName: undefined,
         },
         cno: {
           ...DEFAULT_CONFIG.repos.cno!,
           baseBranch: 'main',
           deployWorkflow: undefined,
+          verifyWorkflow: undefined,
+          reviewEnvName: undefined,
           requiredChecks: [],
           protectedPaths: undefined,
         },
@@ -75,38 +80,57 @@ describe('backfillRepoDefaults', () => {
       },
     })
     expect(backfillRepoDefaults(stored)).toEqual([
+      'engine.deployWorkflow = staging.yml',
+      'engine.baseBranch release → dev',
+      'engine.verifyWorkflow = staging-verify.yml',
+      'engine.reviewEnvName = oar-review',
       'engine.requiredChecks = Verify, Integration tests, End-to-end tests, Package and drive the desktop app',
-      'engine.deliveryMode = merge (no staging)',
       'cno.deployWorkflow = staging.yml',
       'cno.baseBranch main → dev',
+      'cno.verifyWorkflow = staging-verify.yml',
+      'cno.reviewEnvName = oar-review',
       'cno.requiredChecks = checks',
       'cno.protectedPaths = .github/, AGENTS.md, CLAUDE.md, .claude/, .codex/, Makefile, setup.cfg, pyproject.toml, .pre-commit-config.yaml, deploy/local/compose.test.yml',
     ])
     expect(stored.repos.cno).toMatchObject({
       baseBranch: 'dev',
       deployWorkflow: 'staging.yml',
+      verifyWorkflow: 'staging-verify.yml',
+      reviewEnvName: 'oar-review',
       requiredChecks: ['checks'],
       deliveryMode: 'staging',
     })
-    expect(stored.repos.engine).toMatchObject({ baseBranch: 'release', deliveryMode: 'merge' })
+    expect(stored.repos.engine).toMatchObject({
+      baseBranch: 'dev',
+      deliveryMode: 'staging',
+      deployWorkflow: 'staging.yml',
+      verifyWorkflow: 'staging-verify.yml',
+      reviewEnvName: 'oar-review',
+    })
     expect(stored.repos.other).toMatchObject({ baseBranch: 'trunk', requiredChecks: [] })
     expect(backfillRepoDefaults(stored)).toEqual([])
     expect(backfillRepoDefaults(ConfigSchema.parse(DEFAULT_CONFIG))).toEqual([])
   })
-  it('keeps an explicit staging choice for a repo whose default is merge-only', () => {
+  it('never overwrites explicit workflow, environment or delivery choices', () => {
     const stored = ConfigSchema.parse({
       ...DEFAULT_CONFIG,
       repos: {
         engine: {
           ...DEFAULT_CONFIG.repos.engine!,
-          deliveryMode: 'staging',
+          deliveryMode: 'merge',
           deployWorkflow: 'deploy.yml',
           verifyWorkflow: 'verify.yml',
+          reviewEnvName: 'mine',
         },
       },
     })
     expect(backfillRepoDefaults(stored)).toEqual([])
-    expect(stored.repos.engine?.deliveryMode).toBe('staging')
+    expect(stored.repos.engine).toMatchObject({
+      deliveryMode: 'merge',
+      deployWorkflow: 'deploy.yml',
+      verifyWorkflow: 'verify.yml',
+      reviewEnvName: 'mine',
+    })
   })
   it('defaults the review and merge settings', () => {
     const c = ConfigSchema.parse(DEFAULT_CONFIG)
@@ -126,7 +150,11 @@ describe('backfillRepoDefaults', () => {
         'End-to-end tests',
         'Package and drive the desktop app',
       ],
-      deliveryMode: 'merge',
+      deliveryMode: 'staging',
+      baseBranch: 'dev',
+      deployWorkflow: 'staging.yml',
+      verifyWorkflow: 'staging-verify.yml',
+      reviewEnvName: 'oar-review',
       buildRunner: 'claude',
     })
     expect(c.repos.cno).toMatchObject({

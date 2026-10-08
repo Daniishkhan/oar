@@ -21,6 +21,7 @@ describe('verified staging lifecycle', () => {
         engine: {
           ...DEFAULT_CONFIG.repos.engine,
           github: 'o/r',
+          baseBranch: 'main',
           deliveryMode: 'staging',
           deployWorkflow: 'deploy.yml',
           verifyWorkflow: 'verify.yml',

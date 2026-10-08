@@ -10,9 +10,28 @@ import {
 import { FactoryDb } from '../../src/factory/db.js'
 import { world } from '../helpers.js'
 
+/** A repo the shipped defaults know nothing about, so the backfill cannot complete it. */
+const incomplete = () =>
+  ConfigSchema.parse({
+    ...DEFAULT_CONFIG,
+    repos: {
+      other: {
+        ...DEFAULT_CONFIG.repos.engine,
+        github: 'o/other',
+        verifyWorkflow: undefined,
+        reviewEnvName: undefined,
+      },
+    },
+    factory: {
+      ...DEFAULT_CONFIG.factory,
+      linear: { ...DEFAULT_CONFIG.factory.linear, teams: { ENG: 'other' } },
+    },
+  })
+
 describe('factory rollout configuration', () => {
-  it('requires staging verification and a dedicated review environment by default', () => {
-    const errors = factoryConfigProblems(ConfigSchema.parse(DEFAULT_CONFIG))
+  it('ships complete defaults, and requires verification and a review environment for a new repo', () => {
+    expect(factoryConfigProblems(ConfigSchema.parse(DEFAULT_CONFIG))).toEqual([])
+    const errors = factoryConfigProblems(incomplete())
     expect(errors.some((e) => e.includes('verifyWorkflow'))).toBe(true)
     expect(errors.some((e) => e.includes('reviewEnvName'))).toBe(true)
   })
@@ -37,13 +56,12 @@ describe('factory rollout configuration', () => {
     expect(factoryConfigProblems(stored)).toEqual([])
     expect(effectiveConfig(stored).notes).toEqual([
       'engine.requiredChecks = Verify, Integration tests, End-to-end tests, Package and drive the desktop app',
-      'engine.deliveryMode = merge (no staging)',
     ])
     expect(stored.repos.engine).toMatchObject({ deliveryMode: 'staging', requiredChecks: [] })
   })
 
   it('rejects incomplete setup and deployment before any infrastructure mutation', async () => {
-    const w = world()
+    const w = world({ config: incomplete() })
     for (const command of [factorySetup, factoryDeploy])
       await expect(command(w.ctx)).rejects.toThrow('factory configuration is incomplete')
     expect(w.exec.lines()).toEqual([])

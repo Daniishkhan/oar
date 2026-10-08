@@ -264,8 +264,11 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
         'End-to-end tests',
         'Package and drive the desktop app',
       ],
-      // A desktop app with no staging: the merge completes the ticket.
-      deliveryMode: 'merge',
+      // A merge to dev packages a staging build; the verify workflow drives that exact revision.
+      baseBranch: 'dev',
+      deployWorkflow: 'staging.yml',
+      verifyWorkflow: 'staging-verify.yml',
+      reviewEnvName: 'oar-review',
     },
     cno: {
       remoteMatch: 'nodes-cno|Synapse-Django',
@@ -280,6 +283,8 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       ports: [8000],
       herdrLabel: 'cno',
       deployWorkflow: 'staging.yml',
+      verifyWorkflow: 'staging-verify.yml',
+      reviewEnvName: 'oar-review',
       // Only the `checks` job runs on PRs; `release` is skipped there and must not count.
       requiredChecks: ['checks'],
       // The files that define the gate the `checks` job runs: a PR may not weaken its own gate.
@@ -313,6 +318,12 @@ export function backfillRepoDefaults(config: Config): string[] {
       if (repo.baseBranch !== d.baseBranch) {
         notes.push(`${name}.baseBranch ${repo.baseBranch} → ${d.baseBranch}`)
         repo.baseBranch = d.baseBranch
+      }
+    }
+    for (const field of ['verifyWorkflow', 'reviewEnvName'] as const) {
+      if (!repo[field] && d[field]) {
+        repo[field] = d[field]
+        notes.push(`${name}.${field} = ${d[field]}`)
       }
     }
     // An empty list means "every observed check", which counts a skipped job as a failure.
