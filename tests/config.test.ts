@@ -69,6 +69,7 @@ describe('backfillRepoDefaults', () => {
           baseBranch: 'main',
           deployWorkflow: undefined,
           requiredChecks: [],
+          protectedPaths: undefined,
         },
         other: { ...DEFAULT_CONFIG.repos.engine!, baseBranch: 'trunk', requiredChecks: [] },
       },
@@ -79,6 +80,7 @@ describe('backfillRepoDefaults', () => {
       'cno.deployWorkflow = staging.yml',
       'cno.baseBranch main → dev',
       'cno.requiredChecks = checks',
+      'cno.protectedPaths = .github/, AGENTS.md, CLAUDE.md, .claude/, .codex/, Makefile, setup.cfg, pyproject.toml, .pre-commit-config.yaml, deploy/local/compose.test.yml',
     ])
     expect(stored.repos.cno).toMatchObject({
       baseBranch: 'dev',

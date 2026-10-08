@@ -132,6 +132,7 @@ describe('verified staging lifecycle', () => {
     let dispatches = 0
     w.exec
       .on('gh pr list', () => ({ code: 0, stderr: '', stdout: JSON.stringify([pr]) }))
+      .on('gh pr view', () => ({ code: 0, stderr: '', stdout: JSON.stringify(pr) }))
       .on('gh pr merge', () => {
         pr.state = 'MERGED'
         pr.mergeCommit = { oid: MERGE }

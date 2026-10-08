@@ -464,6 +464,11 @@ describe('prFiles and protectedChanges', () => {
     )
     expect(await prFiles(feed(exec), 7)).toEqual(['src/a.ts', 'docs/b.md', '.github/CODEOWNERS'])
     expect(await prFiles(feed(new FakeExec()), 7)).toBeNull()
+    const capped = new FakeExec().on(
+      /pulls\/7\/files/,
+      json([Array.from({ length: 3000 }, (_, i) => ({ filename: `src/f${i}.ts` }))]),
+    )
+    expect(await prFiles(feed(capped), 7)).toBeNull()
   })
   it('matches directories by prefix and files exactly', () => {
     const files = [

@@ -46,6 +46,9 @@ export function paths(home: string = homedir()): Paths {
   }
 }
 
+/** Changing these files is a human's merge in every repo (see `protectedPaths`). */
+export const DEFAULT_PROTECTED_PATHS = ['.github/', 'AGENTS.md', 'CLAUDE.md', '.claude/', '.codex/']
+
 export const RepoSchema = z
   .object({
     /** Regex tested against `git remote get-url origin` to identify this repo on the Mac. */
@@ -79,9 +82,7 @@ export const RepoSchema = z
      * green, and the reviewer reads the agent instruction files from it. An entry ending in "/"
      * matches a directory.
      */
-    protectedPaths: z
-      .array(z.string().min(1))
-      .default(['.github/', 'AGENTS.md', 'CLAUDE.md', '.claude/', '.codex/']),
+    protectedPaths: z.array(z.string().min(1)).default([...DEFAULT_PROTECTED_PATHS]),
     /** Staging is the default completion contract; merge-only delivery must be explicitly selected. */
     deliveryMode: z.enum(['staging', 'merge']).default('staging'),
     /** GitHub Actions workflow that deploys the merged revision on `baseBranch`. */
@@ -281,6 +282,15 @@ export const DEFAULT_CONFIG: Config = ConfigSchema.parse({
       deployWorkflow: 'staging.yml',
       // Only the `checks` job runs on PRs; `release` is skipped there and must not count.
       requiredChecks: ['checks'],
+      // The files that define the gate the `checks` job runs: a PR may not weaken its own gate.
+      protectedPaths: [
+        ...DEFAULT_PROTECTED_PATHS,
+        'Makefile',
+        'setup.cfg',
+        'pyproject.toml',
+        '.pre-commit-config.yaml',
+        'deploy/local/compose.test.yml',
+      ],
     },
   },
 })
@@ -309,6 +319,15 @@ export function backfillRepoDefaults(config: Config): string[] {
     if (!repo.requiredChecks.length && d.requiredChecks.length) {
       repo.requiredChecks = [...d.requiredChecks]
       notes.push(`${name}.requiredChecks = ${d.requiredChecks.join(', ')}`)
+    }
+    // A stored entry still on the generic list takes the repo's own protected paths.
+    const generic = JSON.stringify(DEFAULT_PROTECTED_PATHS)
+    if (
+      JSON.stringify(repo.protectedPaths) === generic &&
+      JSON.stringify(d.protectedPaths) !== generic
+    ) {
+      repo.protectedPaths = [...d.protectedPaths]
+      notes.push(`${name}.protectedPaths = ${d.protectedPaths.join(', ')}`)
     }
     // A repo whose shipped default has no staging completes on merge; a stored entry predating
     // `deliveryMode` would otherwise wait for a deployment that never comes.

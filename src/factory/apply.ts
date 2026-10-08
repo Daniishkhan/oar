@@ -706,6 +706,22 @@ export class Applier {
       const guarded = files ? protectedChanges(files, cfg.protectedPaths) : null
       if (!guarded) throw new Error('could not read the list of files the PR changes')
       if (guarded.length) throw new Error(`the PR changes protected paths: ${guarded.join(', ')}`)
+      // The file list and the labels were read for the PR's current head: it must be the head
+      // that was reviewed and that `--match-head-commit` will merge.
+      const view = await gh([
+        'pr',
+        'view',
+        String(a.number),
+        '--repo',
+        cfg.github,
+        '--json',
+        'headRefOid,state',
+      ])
+      const live = view.ok ? (JSON.parse(view.stdout) as { headRefOid?: string }) : null
+      if (live?.headRefOid !== a.sha)
+        throw new Error(
+          `the PR head is ${live?.headRefOid?.slice(0, 7) ?? 'unknown'}, not the reviewed ${a.sha.slice(0, 7)}`,
+        )
       if (a.isDraft) {
         const ready = await gh(['pr', 'ready', String(a.number), '--repo', cfg.github])
         if (!ready.ok) throw new Error(`gh pr ready: ${ready.stderr || ready.stdout}`)

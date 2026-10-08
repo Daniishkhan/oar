@@ -147,6 +147,11 @@ function worker(w: ReturnType<typeof world>) {
     .on(/^herdr --machine engine agent send-keys /, { stdout: '{"id":"1","result":{}}' })
     .on(/^herdr --machine engine pane close /, { stdout: '{"id":"1","result":{}}' })
     .on('gh pr list', () => ({ code: 0, stderr: '', stdout: pr.json }))
+    .on('gh pr view', () => ({
+      code: 0,
+      stderr: '',
+      stdout: JSON.stringify((JSON.parse(pr.json) as unknown[])[0] ?? {}),
+    }))
     .on('gh pr comment', { code: 0, stdout: 'https://github.com/o/r/pull/7#issuecomment-1' })
     .on('gh pr ready', { code: 0 })
     .on('gh pr merge', () => ({ code: merge.code, stdout: '', stderr: merge.stderr }))

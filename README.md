@@ -200,7 +200,13 @@ another app's run can fail the gate but never pass it, because anyone holding a 
 builder does) can post those. A PR that touches `protectedPaths` (default `.github/`,
 `AGENTS.md`, `CLAUDE.md`, `.claude/`, `.codex/`) is never merged by the factory: CI runs the
 workflow version from the PR, so a PR could make its own checks green, and the reviewer reads the
-instruction files from it. Such an issue goes to Needs Input for a human merge. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
+instruction files from it. Such an issue goes to Needs Input for a human merge. CI still
+validates the PR with the PR's own tests, so a PR can pass by weakening them; the reviewer's
+rubric treats removed or weakened tests as blocking, and nodes-cno's shipped list also protects
+the files that define its gate (`Makefile`, `setup.cfg`, `pyproject.toml`,
+`.pre-commit-config.yaml`, the test compose file). Extend `protectedPaths` per repo as needed.
+Right before merging, the controller re-reads the PR head and refuses when it is not the
+reviewed commit, and `--match-head-commit` makes GitHub refuse as well. `deliveryMode` defaults to `staging`. A repository without staging must explicitly
 choose `"deliveryMode": "merge"`; that is a different completion contract.
 
 For sandbox review, `reviewEnvName` must differ from the builder's `envName`. Prepare that Boat

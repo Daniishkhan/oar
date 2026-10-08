@@ -167,6 +167,7 @@ describe('merge execution safety', () => {
       })
       .on(/statuses/, { stdout: '[[]]' })
       .on(/\/files\?/, { stdout: '[[]]' })
+      .on('gh pr view', { stdout: JSON.stringify({ headRefOid: 'head', state: 'OPEN' }) })
       .on('gh pr ready', { code: 0 })
       .on('gh pr merge', { code: 0 })
   }
@@ -206,6 +207,18 @@ describe('merge execution safety', () => {
       w.exec.on(/\/files\?/, {
         stdout: JSON.stringify([[{ filename: '.github/workflows/ci.yml' }]]),
       })
+      checks(w, 'success')
+      await attempt(w)
+      expect(w.exec.lines().some((line) => line.startsWith('gh pr merge'))).toBe(false)
+    } finally {
+      w.db.close()
+    }
+  })
+
+  it('refuses to merge when the PR head moved after the checks were read', async () => {
+    const w = setup()
+    try {
+      w.exec.on('gh pr view', { stdout: JSON.stringify({ headRefOid: 'newer', state: 'OPEN' }) })
       checks(w, 'success')
       await attempt(w)
       expect(w.exec.lines().some((line) => line.startsWith('gh pr merge'))).toBe(false)

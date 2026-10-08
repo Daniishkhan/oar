@@ -307,6 +307,8 @@ export async function prFiles(gh: GhFeed, number: number): Promise<string[] | nu
   if (json === null) return null
   const p = z.array(z.array(PrFile)).safeParse(Array.isArray(json) ? json : [json])
   if (!p.success) return null
+  // GitHub lists at most 3000 files per PR; past that a protected path could hide. Unknown.
+  if (p.data.flat().length >= 3000) return null
   return [
     ...new Set(
       p.data
