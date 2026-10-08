@@ -28,6 +28,7 @@ import {
   findingsSummary,
   parseReviewOutput,
   REVIEW_SCHEMA,
+  reviewCheckout,
   reviewCommand,
   reviewFiles,
   reviewPrompt,
@@ -376,7 +377,7 @@ export class Applier {
       const prep = await runCommand(
         this.ctx.boat,
         sandboxId,
-        `git worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune; git fetch -q origin ${shq(cfg.baseBranch)} ${shq(task.branch)} && git worktree add -f --detach ${shq(wt)} ${shq(sha)}`,
+        reviewCheckout(cfg, { wt, sha, branch: task.branch, files }),
         { cwd: cfg.vmPath, timeoutSeconds: 300 },
       )
       if (prep.exitCode !== 0)
@@ -384,7 +385,7 @@ export class Applier {
       await this.ctx.boat.writeFile(
         sandboxId,
         files.prompt,
-        reviewPrompt(row, cfg, { url: row.prUrl ?? '', headSha: sha }, review.blocking),
+        reviewPrompt(row, cfg, { url: row.prUrl ?? '', headSha: sha }, review.blocking, files),
       )
       await this.ctx.boat.writeFile(sandboxId, files.schema, JSON.stringify(REVIEW_SCHEMA))
       const timeoutSeconds = Math.round(review.timeoutMinutes * 60)
@@ -408,7 +409,7 @@ export class Applier {
         await runCommand(
           this.ctx.boat,
           sandboxId,
-          `git worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune`,
+          `git -c core.hooksPath=/dev/null worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune`,
           { cwd: cfg.vmPath, timeoutSeconds: 60 },
         ).catch(() => undefined)
     }

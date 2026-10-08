@@ -55,11 +55,36 @@ export const REVIEW_SCHEMA = {
 export const reviewFiles = (taskId: string) => {
   const dir = vmTaskDir(taskId)
   return {
+    dir,
     prompt: `${dir}/review-prompt.md`,
     schema: `${dir}/review-schema.json`,
     out: `${dir}/review-out.json`,
     log: `${dir}/review-log.txt`,
+    /** `git diff origin/<base>...HEAD` and the commit list, computed by the controller, not the reviewer. */
+    diff: `${dir}/review-diff.patch`,
+    commits: `${dir}/review-commits.txt`,
   }
+}
+export type ReviewFiles = ReturnType<typeof reviewFiles>
+
+/**
+ * Check out `sha` detached at `wt` (run from the repo's main checkout) and write the diff and
+ * commit list for the reviewer. Git hooks are off: the checkout is the PR's code, not ours.
+ */
+export function reviewCheckout(
+  cfg: RepoConfig,
+  o: { wt: string; sha: string; branch: string; files: ReviewFiles },
+): string {
+  const { wt, sha, branch, files } = o
+  const base = `origin/${cfg.baseBranch}`
+  const cleanup = `git -c core.hooksPath=/dev/null worktree remove --force ${shq(wt)} 2>/dev/null; git worktree prune`
+  const steps = [
+    `git fetch -q origin ${shq(cfg.baseBranch)} ${shq(branch)}`,
+    `git -c core.hooksPath=/dev/null worktree add -f --detach ${shq(wt)} ${shq(sha)}`,
+    `git -C ${shq(wt)} log --oneline ${shq(`${base}..HEAD`)} > ${shq(files.commits)}`,
+    `git -C ${shq(wt)} diff ${shq(`${base}...HEAD`)} > ${shq(files.diff)}`,
+  ]
+  return `${cleanup}; ${steps.join(' && ')}`
 }
 
 /** A detached checkout of the PR head, separate from the builder's worktree. */
@@ -72,8 +97,11 @@ export function reviewPrompt(
   cfg: RepoConfig,
   pr: { url: string; headSha: string },
   blocking: readonly Severity[],
+  files: ReviewFiles,
 ): string {
   const fill: Array<[string, string]> = [
+    ['<diff-path>', files.diff],
+    ['<commits-path>', files.commits],
     ['<pr-url>', pr.url],
     ['<identifier>', row.identifier],
     ['<title>', row.title],
@@ -89,21 +117,22 @@ export function reviewPrompt(
   return text
 }
 
-/** The shell command that runs the reviewer in `cwd`, read-only, under a hard timeout. */
+/**
+ * The shell command that runs the reviewer in `cwd` under a hard timeout. The checkout is the
+ * PR's code, so nothing in it may configure the reviewer: Codex runs read-only without the user
+ * config (no trusted projects, so no project config; untrusted hooks never run) and without
+ * execpolicy rules; Claude runs `--restricted` (no command tools, no settings files, file tools
+ * confined to the checkout and the task dir) with no MCP servers.
+ */
 export function reviewCommand(
   runner: ReviewRunner,
-  o: {
-    cwd: string
-    files: ReturnType<typeof reviewFiles>
-    timeoutSeconds: number
-    model?: string
-  },
+  o: { cwd: string; files: ReviewFiles; timeoutSeconds: number; model?: string },
 ): string {
-  const { prompt, schema, out, log } = o.files
+  const { dir, prompt, schema, out, log } = o.files
   const pre = `export PATH="$HOME/.local/bin:$PATH"; cd ${shq(o.cwd)} && rm -f ${shq(out)} && timeout ${o.timeoutSeconds}s`
   if (runner === 'codex')
-    return `${pre} codex exec -C ${shq(o.cwd)} -s read-only --skip-git-repo-check --ephemeral --color never${o.model ? ` -m ${shq(o.model)}` : ''} --output-schema ${shq(schema)} -o ${shq(out)} - < ${shq(prompt)} > ${shq(log)} 2>&1`
-  return `${pre} claude -p --output-format json --json-schema "$(cat ${shq(schema)})" --permission-mode default --allowedTools 'Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)'${o.model ? ` --model ${shq(o.model)}` : ''} < ${shq(prompt)} > ${shq(out)} 2> ${shq(log)}`
+    return `${pre} codex exec -C ${shq(o.cwd)} -s read-only --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral --color never -c model_reasoning_effort=high${o.model ? ` -m ${shq(o.model)}` : ''} --output-schema ${shq(schema)} -o ${shq(out)} - < ${shq(prompt)} > ${shq(log)} 2>&1`
+  return `${pre} claude -p --restricted --strict-mcp-config --add-dir ${shq(dir)} --output-format json --json-schema "$(cat ${shq(schema)})"${o.model ? ` --model ${shq(o.model)}` : ''} < ${shq(prompt)} > ${shq(out)} 2> ${shq(log)}`
 }
 
 const stripFences = (text: string) =>

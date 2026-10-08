@@ -386,7 +386,9 @@ describe('Factory automated review and merge (fakes)', () => {
     const run = w.boat.commands.find((c) => c.req.command.includes('codex exec'))
     expect(run?.req.command).toContain('-s read-only')
     expect(
-      w.boat.commands.some((c) => c.req.command.includes('git worktree add -f --detach')),
+      w.boat.commands.some((c) =>
+        c.req.command.includes('-c core.hooksPath=/dev/null worktree add -f --detach'),
+      ),
     ).toBe(true)
     expect(w.exec.lines().some((l) => l.startsWith('gh pr comment 7 --repo'))).toBe(true)
     expect(w.exec.calls.find((c) => c.args[1] === 'comment')!.opts).toMatchObject({

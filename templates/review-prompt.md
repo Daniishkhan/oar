@@ -14,8 +14,9 @@ files, commit, push, or comment anywhere. A program consumes your answer.
 
 1. Read the repository's `AGENTS.md` and `CLAUDE.md` first, if they exist; their rules are part
    of the bar.
-2. `git log --oneline origin/<base>..HEAD` and `git diff origin/<base>...HEAD` show the change.
-   Read the touched files around the diff and the tests that cover them.
+2. The change is in `<diff-path>` (`git diff origin/<base>...HEAD`), its commits in
+   `<commits-path>`. Read the touched files in this checkout around the diff, and the tests that
+   cover them.
 3. Judge the change against the task above and the repository's rules. Do not run the test
    suite: CI already passed (the gate is `<gate>`).
 

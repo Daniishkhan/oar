@@ -8,6 +8,7 @@ import {
   findingsToComments,
   parseReviewOutput,
   REVIEW_SCHEMA,
+  reviewCheckout,
   reviewCommand,
   reviewFiles,
   reviewPrompt,
@@ -36,12 +37,31 @@ describe('review helpers', () => {
       timeoutSeconds: 900,
     })
     expect(cmd).toBe(
-      `export PATH="$HOME/.local/bin:$PATH"; cd '/home/user/worktrees/cno/review-cno-1-x-ab12' && rm -f '/home/user/oar/tasks/cno-1-x-ab12/review-out.json' && timeout 900s codex exec -C '/home/user/worktrees/cno/review-cno-1-x-ab12' -s read-only --skip-git-repo-check --ephemeral --color never --output-schema '/home/user/oar/tasks/cno-1-x-ab12/review-schema.json' -o '/home/user/oar/tasks/cno-1-x-ab12/review-out.json' - < '/home/user/oar/tasks/cno-1-x-ab12/review-prompt.md' > '/home/user/oar/tasks/cno-1-x-ab12/review-log.txt' 2>&1`,
+      `export PATH="$HOME/.local/bin:$PATH"; cd '/home/user/worktrees/cno/review-cno-1-x-ab12' && rm -f '/home/user/oar/tasks/cno-1-x-ab12/review-out.json' && timeout 900s codex exec -C '/home/user/worktrees/cno/review-cno-1-x-ab12' -s read-only --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral --color never -c model_reasoning_effort=high --output-schema '/home/user/oar/tasks/cno-1-x-ab12/review-schema.json' -o '/home/user/oar/tasks/cno-1-x-ab12/review-out.json' - < '/home/user/oar/tasks/cno-1-x-ab12/review-prompt.md' > '/home/user/oar/tasks/cno-1-x-ab12/review-log.txt' 2>&1`,
     )
+    expect(cmd).not.toContain('bypass')
     const claude = reviewCommand('claude', { cwd: '/w', files, timeoutSeconds: 60, model: 'opus' })
-    expect(claude).toContain('claude -p --output-format json --json-schema "$(cat ')
-    expect(claude).toContain('--permission-mode default --allowedTools ')
+    expect(claude).toContain(
+      "claude -p --restricted --strict-mcp-config --add-dir '/home/user/oar/tasks/cno-1-x-ab12' --output-format json --json-schema \"$(cat ",
+    )
     expect(claude).toContain("--model 'opus'")
+  })
+
+  it('checks out the head with git hooks off and writes the diff for the reviewer', () => {
+    const files = reviewFiles('t1')
+    const cmd = reviewCheckout(cfg, {
+      wt: '/w/review-t1',
+      sha: 'abc',
+      branch: 'codex/cno-1-x',
+      files,
+    })
+    expect(cmd).toBe(
+      "git -c core.hooksPath=/dev/null worktree remove --force '/w/review-t1' 2>/dev/null; git worktree prune; " +
+        "git fetch -q origin 'dev' 'codex/cno-1-x' && " +
+        "git -c core.hooksPath=/dev/null worktree add -f --detach '/w/review-t1' 'abc' && " +
+        "git -C '/w/review-t1' log --oneline 'origin/dev..HEAD' > '/home/user/oar/tasks/t1/review-commits.txt' && " +
+        "git -C '/w/review-t1' diff 'origin/dev...HEAD' > '/home/user/oar/tasks/t1/review-diff.patch'",
+    )
   })
 
   it('parses codex output, the claude envelope and fenced JSON; rejects anything else', () => {
@@ -113,15 +133,22 @@ describe('review helpers', () => {
       title: 'Add a header',
       description: 'Keep <base> literal.',
     } as IssueRow
-    const text = reviewPrompt(row, cfg, { url: 'https://github.com/o/r/pull/7', headSha: 'abc' }, [
-      'P0',
-      'P1',
-    ])
+    const text = reviewPrompt(
+      row,
+      cfg,
+      { url: 'https://github.com/o/r/pull/7', headSha: 'abc' },
+      ['P0', 'P1'],
+      reviewFiles('t1'),
+    )
+    expect(text).toContain('/home/user/oar/tasks/t1/review-diff.patch')
+    expect(text).toContain('/home/user/oar/tasks/t1/review-commits.txt')
     expect(text).toContain('Issue CNO-1: Add a header')
     expect(text).toContain('`origin/dev`')
     expect(text).toContain('Keep <base> literal.')
     expect(text).toContain('Only P0 and P1 findings block the merge.')
-    expect(text).not.toMatch(/<(pr-url|identifier|title|head-sha|gate|blocking|description)>/)
+    expect(text).not.toMatch(
+      /<(pr-url|identifier|title|head-sha|gate|blocking|description|diff-path|commits-path)>/,
+    )
   })
 
   it('ships a strict schema', () => {
